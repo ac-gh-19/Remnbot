@@ -1,5 +1,6 @@
 import 'dotenv/config';
-import { Client, Events, GatewayIntentBits, Partials} from 'discord.js';
+import { Client, Events, GatewayIntentBits, MessageFlags, Partials } from 'discord.js';
+import { commands } from './commands/index.js';
 const { DISCORD_TOKEN } = process.env;
 
 const client = new Client({
@@ -22,7 +23,7 @@ const client = new Client({
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildScheduledEvents,
     GatewayIntentBits.AutoModerationConfiguration,
-    GatewayIntentBits.AutoModerationExecution
+    GatewayIntentBits.AutoModerationExecution,
   ],
 
   partials: [
@@ -30,12 +31,32 @@ const client = new Client({
     Partials.Message,
     Partials.Reaction,
     Partials.User,
-    Partials.GuildMember
-  ]
+    Partials.GuildMember,
+  ],
 });
 
 client.once(Events.ClientReady, (readyClient) => {
   console.log(`Logged in as ${readyClient.user.tag}`);
+});
+
+client.on(Events.InteractionCreate, async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
+
+  const command = commands.get(interaction.commandName);
+  if (!command) return;
+
+  try {
+    await command.execute(interaction);
+  } catch (error) {
+    console.error(`Error running /${interaction.commandName}:`, error);
+    const content = 'Something went wrong running that command.';
+    // A reply's ephemeral flag is fixed when it's first sent, so edits only change the content
+    if (interaction.deferred || interaction.replied) {
+      await interaction.editReply(content).catch(() => {});
+    } else {
+      await interaction.reply({ content, flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+  }
 });
 
 client.on(Events.Error, (error) => {
