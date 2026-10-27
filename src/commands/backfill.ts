@@ -1,4 +1,4 @@
-import { mkdir, open, rm, writeFile } from 'node:fs/promises';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import {
   MessageFlags,
   PermissionFlagsBits,
@@ -9,6 +9,13 @@ import {
 } from 'discord.js';
 import { ConversationChunker, type Chunk } from '../chunker.js';
 import { chunking } from '../config.js';
+import {
+  getBackfillCursor,
+  saveMessages,
+  storedMessages,
+  upsertChannel,
+  upsertGuild,
+} from '../db.js';
 
 const PAGE_SIZE = 100; // Discord's max per request
 const HISTORY_DIR = new URL('../../messageHistoryChannel/', import.meta.url);
@@ -22,9 +29,9 @@ function toFolderName(name: string): string {
 const MEDIA_LINK =
   /https?:\/\/(?:(?:[\w-]+\.)*(?:tenor|giphy|klipy)\.com\/\S*|[^\s?#]+\.(?:gif|gifv|png|jpe?g|webp|mp4|mov)(?:[?#]\S*)?)/gi;
 
-// The message's text with GIF/image links removed; empty if nothing informative is left
-function textContent(message: Message): string {
-  return message.content.replace(MEDIA_LINK, '').trim();
+// The text with GIF/image links removed; empty if nothing informative is left
+function textContent(content: string): string {
+  return content.replace(MEDIA_LINK, '').trim();
 }
 
 interface MessageRecord {
@@ -32,15 +39,6 @@ interface MessageRecord {
   author: string;
   content: string;
   createdAt: string;
-}
-
-function toRecord(message: Message): MessageRecord {
-  return {
-    id: message.id,
-    author: message.author.tag,
-    content: textContent(message),
-    createdAt: message.createdAt.toISOString(),
-  };
 }
 
 // Pretty-prints a chunk with one message per line, so files stay readable but not huge
@@ -60,13 +58,13 @@ function channelName(channel: TextBasedChannel): string {
 // Message IDs are snowflakes, which increase over time, so sorting by ID sorts by age
 const byIdAscending = (a: Message, b: Message): number => (BigInt(a.id) < BigInt(b.id) ? -1 : 1);
 
-// Walks a channel's history from oldest to newest, calling onMessage for each message.
-// Returns the total number of messages seen.
+// Walks a channel's history from oldest to newest, starting after the message ID `after`,
+// calling onPage with each page of messages (oldest first). Returns the total number seen.
 export async function fetchAllMessages(
   channel: TextBasedChannel,
-  onMessage: (message: Message) => Promise<void>,
+  after: string,
+  onPage: (messages: Message[]) => Promise<void>,
 ): Promise<number> {
-  let after = '0'; // every message ID is greater than 0, so the first page is the oldest
   let total = 0;
 
   while (true) {
@@ -77,9 +75,7 @@ export async function fetchAllMessages(
     const batch = [...page.values()].sort(byIdAscending);
     const last = batch.at(-1);
     if (!last) break;
-    for (const message of batch) {
-      await onMessage(message);
-    }
+    await onPage(batch);
 
     total += batch.length;
     after = last.id;
@@ -97,8 +93,15 @@ export const data = new SlashCommandBuilder()
   .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild);
 
 export async function execute(interaction: ChatInputCommandInteraction): Promise<void> {
-  const { channel } = interaction;
-  if (!channel?.isTextBased()) {
+  if (!interaction.inCachedGuild()) {
+    await interaction.reply({
+      content: 'Backfill only works in server channels.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+  const { channel, guild } = interaction;
+  if (!channel) {
     await interaction.reply({
       content: "I can't read messages in this channel.",
       flags: MessageFlags.Ephemeral,
@@ -108,19 +111,25 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
 
   // Backfilling can take a while, so acknowledge within Discord's 3-second window first
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+  await upsertGuild(guild);
+  await upsertChannel(channel);
+
+  // Pick up after the last saved message, so a re-run only fetches what's new
+  const cursor = await getBackfillCursor(channel.id);
+  let saved = 0;
+  const fetched = await fetchAllMessages(channel, cursor ?? '0', async (messages) => {
+    saved += await saveMessages(channel.id, messages);
+  });
+
+  // Chunks are rebuilt from every saved message, so each run replaces the previous output
   const folderName = toFolderName(channelName(channel));
-
   const channelDir = new URL(`${folderName}/`, HISTORY_DIR);
-  await mkdir(channelDir, { recursive: true });
-
-  // Each run replaces the previous output, so stale chunks from an older run don't linger
   const chunksDir = new URL('chunks/', channelDir);
   await rm(chunksDir, { recursive: true, force: true });
-  await rm(new URL('chunks.jsonl', channelDir), { force: true }); // older single-file format
-  await mkdir(chunksDir);
+  await rm(new URL('messages.jsonl', channelDir), { force: true }); // replaced by the database
+  await mkdir(chunksDir, { recursive: true });
 
-  // One JSON object per line, oldest first
-  const messagesFile = await open(new URL('messages.jsonl', channelDir), 'w');
   // One file per chunk, e.g. chunks/00001.json, so they sort in order
   const chunker = new ConversationChunker<MessageRecord>(chunking, (chunk) =>
     writeFile(
@@ -129,24 +138,24 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
     ),
   );
 
-  let total: number;
-  let saved = 0;
-  try {
-    total = await fetchAllMessages(channel, async (message) => {
-      // Skip GIF/image-only messages (and attachment-only ones with no text)
-      if (!textContent(message)) return;
-      const record = toRecord(message);
-      await messagesFile.write(JSON.stringify(record) + '\n');
-      await chunker.add(record);
-      saved++;
+  let chunked = 0;
+  for await (const message of storedMessages(channel.id)) {
+    // Skip GIF/image-only messages (and attachment-only ones with no text)
+    const content = textContent(message.content);
+    if (!content) continue;
+    await chunker.add({
+      id: message.id,
+      author: message.authorName,
+      content,
+      createdAt: message.createdAt.toISOString(),
     });
-    await chunker.flush();
-  } finally {
-    await messagesFile.close();
+    chunked++;
   }
+  await chunker.flush();
 
   await interaction.editReply(
-    `Done — saved ${saved} of ${total} messages from #${channelName(channel)} (skipped ${total - saved} GIF/image-only) ` +
-      `into ${chunker.count} chunks in messageHistoryChannel/${folderName}/chunks/.`,
+    `Done — saved ${saved} new of ${fetched} fetched messages from #${channelName(channel)}` +
+      `${cursor ? ' (resumed from the last backfill)' : ''}. ` +
+      `Chunked ${chunked} text messages into ${chunker.count} chunks in messageHistoryChannel/${folderName}/chunks/.`,
   );
 }

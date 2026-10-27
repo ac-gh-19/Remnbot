@@ -12,6 +12,12 @@ function intFromEnv(name: string, fallback: number): number {
   return value;
 }
 
+const { DATABASE_URL } = process.env;
+if (!DATABASE_URL) {
+  throw new Error('DATABASE_URL must be set, e.g. postgres://localhost:5432/discord_bot');
+}
+export const databaseUrl = DATABASE_URL;
+
 export const chunking: ChunkingOptions = {
   // Most messages a single chunk can hold
   messageLimit: intFromEnv('CHUNK_MESSAGE_LIMIT', 300),
