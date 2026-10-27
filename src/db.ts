@@ -76,6 +76,19 @@ export async function saveMessages(channelId: string, messages: Message[]): Prom
   return rows[0]?.inserted ?? 0;
 }
 
+// Each author's most recent name in a guild, for turning <@id> mentions back into names.
+// People who were mentioned but never posted aren't included.
+export async function authorNames(guildId: string): Promise<Map<string, string>> {
+  const { rows } = await pool.query<{ id: string; name: string }>(
+    `SELECT DISTINCT ON (author_id) author_id AS id, author_name AS name
+     FROM messages
+     WHERE guild_id = $1
+     ORDER BY author_id, id DESC`,
+    [guildId],
+  );
+  return new Map(rows.map(({ id, name }) => [id, name]));
+}
+
 export interface StoredMessage {
   id: string;
   authorName: string;
