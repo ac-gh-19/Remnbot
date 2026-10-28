@@ -14,6 +14,7 @@ src/
   config.ts             Env-driven settings (DATABASE_URL, chunking options)
   db.ts                 Postgres pool and queries
   chunker.ts            ConversationChunker: groups messages into conversation chunks
+  embedding.ts          Formats chunks as transcripts for summarizing; embeds text with Voyage
 db/schema.sql           Tables: guilds, channels, messages
 messageHistoryChannel/  /backfill output (gitignored)
 ```
@@ -29,6 +30,7 @@ Everything comes from environment variables, loaded from `.env` by `dotenv/confi
 | `CLIENT_ID` | `deploy-commands.ts` | The application ID that owns the commands |
 | `GUILD_ID` | `deploy-commands.ts` | The server the commands are registered in |
 | `DATABASE_URL` | `config.ts` → `db.ts` | Postgres connection string (required; startup throws without it) |
+| `VOYAGE_API_KEY` | `config.ts` → `embedding.ts` | Voyage AI key for embeddings (optional; only needed to embed) |
 | `CHUNK_MESSAGE_LIMIT`, `CHUNK_OVERLAP`, `CONVERSATION_GAP_MINUTES`, `CONVERSATION_MIN_MESSAGES` | `config.ts` → `chunker.ts` | Chunking behaviour, described under [/backfill](#the-backfill-command) |
 
 ## How the bot connects to Discord

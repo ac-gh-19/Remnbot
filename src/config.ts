@@ -18,6 +18,9 @@ if (!DATABASE_URL) {
 }
 export const databaseUrl = DATABASE_URL;
 
+// Optional so the bot runs without it; creating embeddings throws if it's missing
+export const voyageApiKey = process.env.VOYAGE_API_KEY;
+
 export const chunking: ChunkingOptions = {
   // Most messages a single chunk can hold
   messageLimit: intFromEnv('CHUNK_MESSAGE_LIMIT', 300),
