@@ -21,7 +21,7 @@ export const databaseUrl = DATABASE_URL;
 // Optional so the bot runs without it; creating embeddings throws if it's missing
 export const voyageApiKey = process.env.VOYAGE_API_KEY;
 
-export const chunking: ChunkingOptions = {
+export const chunkingOptions: ChunkingOptions = {
   // Most messages a single chunk can hold
   messageLimit: intFromEnv('CHUNK_MESSAGE_LIMIT', 300),
   // Messages repeated from the end of a full chunk at the start of the next one
@@ -32,9 +32,9 @@ export const chunking: ChunkingOptions = {
   minMessages: intFromEnv('CONVERSATION_MIN_MESSAGES', 20),
 };
 
-if (chunking.messageLimit < 1) {
+if (chunkingOptions.messageLimit < 1) {
   throw new Error('CHUNK_MESSAGE_LIMIT must be at least 1');
 }
-if (chunking.overlap >= chunking.messageLimit) {
+if (chunkingOptions.overlap >= chunkingOptions.messageLimit) {
   throw new Error('CHUNK_OVERLAP must be smaller than CHUNK_MESSAGE_LIMIT');
 }
