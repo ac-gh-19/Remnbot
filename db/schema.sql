@@ -1,5 +1,7 @@
 -- Discord IDs are 64-bit snowflakes, so they fit in BIGINT
 
+CREATE EXTENSION IF NOT EXISTS vector;        -- pgvector: the vector type and nearest-neighbour search
+
 CREATE TABLE IF NOT EXISTS guilds (
   id          BIGINT PRIMARY KEY,
   name        TEXT NOT NULL,
@@ -30,3 +32,33 @@ CREATE TABLE IF NOT EXISTS messages (
 
 CREATE INDEX IF NOT EXISTS messages_channel_id_id_idx ON messages (channel_id, id);
 CREATE INDEX IF NOT EXISTS messages_guild_id_created_at_idx ON messages (guild_id, created_at);
+
+-- Keyword search over raw message text (slang, names, inside jokes); kept up to date by Postgres
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS search_tsv tsvector
+  GENERATED ALWAYS AS (to_tsvector('english', content)) STORED;
+CREATE INDEX IF NOT EXISTS messages_search_tsv_idx ON messages USING gin (search_tsv);
+
+-- One row per conversation chunk. Chunks are rebuilt from messages on every backfill;
+-- content_hash recognises a rebuilt chunk as one already stored, so its summary and
+-- embedding are kept rather than paid for again.
+CREATE TABLE IF NOT EXISTS chunks (
+  id               BIGSERIAL PRIMARY KEY,
+  channel_id       BIGINT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+  guild_id         BIGINT NOT NULL REFERENCES guilds(id) ON DELETE CASCADE,
+  first_message_id BIGINT NOT NULL,          -- the chunk's messages are this channel's
+  last_message_id  BIGINT NOT NULL,          -- messages with IDs in this range
+  started_at       TIMESTAMPTZ NOT NULL,
+  ended_at         TIMESTAMPTZ NOT NULL,
+  content_hash     TEXT NOT NULL,            -- sha256 of each message's ID and text
+  summary          TEXT,                     -- NULL until the chunk is summarized
+  topics           TEXT[],
+  summary_attempts INT NOT NULL DEFAULT 0,   -- lets the summarizer give up on a chunk that keeps failing
+  embedding        vector(1024),             -- NULL until the summary is embedded
+  embedding_model  TEXT,                     -- e.g. 'voyage-4', to find rows a model change made stale
+  search_tsv       tsvector GENERATED ALWAYS AS (to_tsvector('english', coalesce(summary, ''))) STORED,
+  UNIQUE (channel_id, content_hash)
+);
+
+CREATE INDEX IF NOT EXISTS chunks_embedding_idx ON chunks USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS chunks_search_tsv_idx ON chunks USING gin (search_tsv);
+CREATE INDEX IF NOT EXISTS chunks_channel_id_first_message_id_idx ON chunks (channel_id, first_message_id);

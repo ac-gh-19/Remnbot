@@ -15,7 +15,7 @@ src/
   db.ts                 Postgres pool and queries
   chunker.ts            ConversationChunker: groups messages into conversation chunks
   embedding.ts          Formats chunks as transcripts for summarizing; embeds text with Voyage
-db/schema.sql           Tables: guilds, channels, messages
+db/schema.sql           Tables: guilds, channels, messages, chunks
 messageHistoryChannel/  /backfill output (gitignored)
 ```
 
@@ -221,14 +221,23 @@ folder name is the channel (or thread) name with unsafe characters replaced by `
 
 ## Database
 
-`db/schema.sql` defines three tables. Discord IDs are 64-bit snowflakes stored as `BIGINT`;
-`pg` returns them as strings, which matches how discord.js represents IDs.
+`db/schema.sql` defines four tables. Discord IDs are 64-bit snowflakes stored as `BIGINT`;
+`pg` returns them as strings, which matches how discord.js represents IDs. It needs the
+[pgvector](https://github.com/pgvector/pgvector) extension (bundled with Postgres.app).
 
 - `guilds` — servers the bot has backfilled in (`left_at` is reserved for when the bot is removed).
 - `channels` — channels and threads (`parent_id` links a thread to its channel) plus the
   backfill cursor `last_backfilled_message_id`.
 - `messages` — one row per message, indexed on `(channel_id, id)` for ordered per-channel
-  reads and `(guild_id, created_at)` for per-server time queries.
+  reads and `(guild_id, created_at)` for per-server time queries. `search_tsv` is a
+  generated full-text column for keyword search over the raw text.
+- `chunks` — conversation chunks, each covering the channel's messages from
+  `first_message_id` to `last_message_id`. `content_hash` (sha256 of each message's ID and
+  text) identifies a chunk across rebuilds, so an unchanged chunk keeps its `summary` and
+  `embedding` (a pgvector `vector(1024)`). Both start as NULL, which is how pending work is
+  found. `search_tsv` indexes the summary for keyword search.
+
+Nothing writes to `chunks` yet.
 
 The schema isn't applied automatically; create the database and run it once:
 
