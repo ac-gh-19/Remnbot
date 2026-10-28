@@ -1,5 +1,6 @@
 import type { ChatInputCommandInteraction, SlashCommandOptionsOnlyBuilder } from 'discord.js';
 import * as backfill from './backfill.js';
+import * as chunk from './chunk.js';
 
 export interface Command {
   data: Pick<SlashCommandOptionsOnlyBuilder, 'name' | 'toJSON'>;
@@ -7,5 +8,5 @@ export interface Command {
 }
 
 export const commands = new Map<string, Command>(
-  [backfill].map((command) => [command.data.name, command]),
+  [backfill, chunk].map((command) => [command.data.name, command]),
 );

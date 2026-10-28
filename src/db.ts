@@ -119,3 +119,46 @@ export async function* storedMessages(
     after = last.id;
   }
 }
+
+export interface ChunkRow {
+  firstMessageId: string;
+  lastMessageId: string;
+  startedAt: string;
+  endedAt: string;
+  contentHash: string;
+}
+
+// Makes a channel's stored chunks match `chunks` in a single statement, so a failure leaves
+// them as they were. A chunk whose hash is already stored keeps its row, along with its summary
+// and embedding; new ones are inserted; stored chunks that are no longer produced are deleted.
+export async function replaceChunks(
+  channelId: string,
+  guildId: string,
+  chunks: ChunkRow[],
+): Promise<{ inserted: number; deleted: number }> {
+  const { rows } = await pool.query<{ inserted: number; deleted: number }>(
+    `WITH inserted AS (
+       INSERT INTO chunks (channel_id, guild_id, first_message_id, last_message_id, started_at, ended_at, content_hash)
+       SELECT $1::bigint, $2::bigint, * FROM unnest(
+         $3::bigint[], $4::bigint[], $5::timestamptz[], $6::timestamptz[], $7::text[]
+       )
+       ON CONFLICT (channel_id, content_hash) DO NOTHING
+       RETURNING 1
+     ), deleted AS (
+       DELETE FROM chunks WHERE channel_id = $1 AND content_hash <> ALL($7::text[])
+       RETURNING 1
+     )
+     SELECT (SELECT count(*) FROM inserted)::int AS inserted,
+            (SELECT count(*) FROM deleted)::int AS deleted`,
+    [
+      channelId,
+      guildId,
+      chunks.map((c) => c.firstMessageId),
+      chunks.map((c) => c.lastMessageId),
+      chunks.map((c) => c.startedAt),
+      chunks.map((c) => c.endedAt),
+      chunks.map((c) => c.contentHash),
+    ],
+  );
+  return rows[0] ?? { inserted: 0, deleted: 0 };
+}

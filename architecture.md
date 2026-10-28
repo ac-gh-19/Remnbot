@@ -1,8 +1,8 @@
 # Architecture
 
 A Discord bot written in TypeScript on top of [discord.js](https://discord.js.org) v14. It
-currently has one slash command, `/backfill`, which saves a channel's full message history to
-Postgres. Splitting that history into conversation "chunks" will be a separate command.
+has two slash commands: `/backfill` saves a channel's full message history to Postgres, and
+`/chunk` splits a channel's saved messages into conversation "chunks" in the `chunks` table.
 
 ```
 src/
@@ -11,6 +11,7 @@ src/
   commands/
     index.ts            Command registry (Map of name -> command module)
     backfill.ts         /backfill
+    chunk.ts            /chunk
   config.ts             Env-driven settings (DATABASE_URL, chunking options)
   db.ts                 Postgres pool and queries
   chunker.ts            ConversationChunker (groups messages into chunks), textContent filter
@@ -30,7 +31,7 @@ Everything comes from environment variables, loaded from `.env` by `dotenv/confi
 | `GUILD_ID` | `deploy-commands.ts` | The server the commands are registered in |
 | `DATABASE_URL` | `config.ts` → `db.ts` | Postgres connection string (required; startup throws without it) |
 | `VOYAGE_API_KEY` | `config.ts` → `embedding.ts` | Voyage AI key for embeddings (optional; only needed to embed) |
-| `CHUNK_MESSAGE_LIMIT`, `CHUNK_OVERLAP`, `CONVERSATION_GAP_MINUTES`, `CONVERSATION_MIN_MESSAGES` | `config.ts` → `chunker.ts` | Chunking behaviour, described under [Conversation chunking](#conversation-chunking) |
+| `CHUNK_MESSAGE_LIMIT`, `CHUNK_OVERLAP`, `CONVERSATION_GAP_MINUTES`, `CONVERSATION_MIN_MESSAGES` | `config.ts` → `chunker.ts` | Chunking behaviour, described under [Conversation chunking](#conversation-chunking-chunk) |
 
 ## How the bot connects to Discord
 
@@ -170,11 +171,13 @@ What gets stored per message: ID, channel, guild, author ID, author tag (as it w
 time), raw content, created/edited timestamps. Attachments, embeds and reactions are not
 stored.
 
-## Conversation chunking
+## Conversation chunking (`/chunk`)
 
-`src/chunker.ts` holds the pieces for turning saved messages into conversation chunks; no
-command runs them yet. `storedMessages` (in `db.ts`) reads a channel from Postgres 1000 rows at
-a time, oldest-first, skipping rows with `deleted_at` set.
+`src/commands/chunk.ts`, Manage Server by default like `/backfill`. Run it in a channel after
+`/backfill`; like `/backfill`, it covers only that channel or thread. It rebuilds the channel's
+chunks from **all** its saved messages and syncs them into the `chunks` table.
+`storedMessages` (in `db.ts`) reads a channel from Postgres 1000 rows at a time, oldest-first,
+skipping rows with `deleted_at` set.
 
 `textContent` removes Tenor/Giphy/Klipy links and direct links to image/video files. Messages
 with nothing left (GIF-only, image-only, attachment-only) aren't worth chunking.
@@ -189,6 +192,16 @@ with nothing left (GIF-only, image-only, attachment-only) aren't worth chunking.
   next one starts with the previous chunk's last `CHUNK_OVERLAP` messages, so an exchange that
   straddles the split appears whole in at least one chunk. Each chunk's `overlap` field says
   how many of its leading messages were carried over.
+
+Only each chunk's metadata is kept in memory: first/last message ID, start/end time, and a
+`content_hash` (sha256 of each message's ID and filtered text). `replaceChunks` then syncs the
+channel in a single statement: chunks whose hash is already stored are left alone (keeping any
+summary and embedding), new hashes are inserted, and stored chunks that are no longer produced
+are deleted. Because it's one statement, a failure leaves the table as it was, and re-running
+is always safe. Usually only the newest conversation changes between runs.
+
+Changing any chunking setting changes most hashes, so every chunk gets replaced (and would
+need summarizing again).
 
 ## Database
 
@@ -207,8 +220,6 @@ with nothing left (GIF-only, image-only, attachment-only) aren't worth chunking.
   text) identifies a chunk across rebuilds, so an unchanged chunk keeps its `summary` and
   `embedding` (a pgvector `vector(1024)`). Both start as NULL, which is how pending work is
   found. `search_tsv` indexes the summary for keyword search.
-
-Nothing writes to `chunks` yet.
 
 The schema isn't applied automatically; create the database and run it once:
 
