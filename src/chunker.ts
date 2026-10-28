@@ -87,3 +87,13 @@ export class ConversationChunker<T extends { createdAt: string }> {
     });
   }
 }
+
+// GIF hosts, plus any link straight to an image/video file (e.g. Discord attachment URLs)
+const MEDIA_LINK =
+  /https?:\/\/(?:(?:[\w-]+\.)*(?:tenor|giphy|klipy)\.com\/\S*|[^\s?#]+\.(?:gif|gifv|png|jpe?g|webp|mp4|mov)(?:[?#]\S*)?)/gi;
+
+// The text with GIF/image links removed; empty if nothing informative is left, in which case
+// the message isn't worth chunking (GIF-only, image-only or attachment-only)
+export function textContent(content: string): string {
+  return content.replace(MEDIA_LINK, '').trim();
+}

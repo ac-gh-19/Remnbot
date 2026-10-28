@@ -2,7 +2,7 @@
 
 A Discord bot written in TypeScript on top of [discord.js](https://discord.js.org) v14. It
 currently has one slash command, `/backfill`, which saves a channel's full message history to
-Postgres and then splits it into conversation "chunks" written as JSON files.
+Postgres. Splitting that history into conversation "chunks" will be a separate command.
 
 ```
 src/
@@ -13,10 +13,9 @@ src/
     backfill.ts         /backfill
   config.ts             Env-driven settings (DATABASE_URL, chunking options)
   db.ts                 Postgres pool and queries
-  chunker.ts            ConversationChunker: groups messages into conversation chunks
+  chunker.ts            ConversationChunker (groups messages into chunks), textContent filter
   embedding.ts          Formats chunks as transcripts for summarizing; embeds text with Voyage
 db/schema.sql           Tables: guilds, channels, messages, chunks
-messageHistoryChannel/  /backfill output (gitignored)
 ```
 
 ## Configuration
@@ -31,7 +30,7 @@ Everything comes from environment variables, loaded from `.env` by `dotenv/confi
 | `GUILD_ID` | `deploy-commands.ts` | The server the commands are registered in |
 | `DATABASE_URL` | `config.ts` → `db.ts` | Postgres connection string (required; startup throws without it) |
 | `VOYAGE_API_KEY` | `config.ts` → `embedding.ts` | Voyage AI key for embeddings (optional; only needed to embed) |
-| `CHUNK_MESSAGE_LIMIT`, `CHUNK_OVERLAP`, `CONVERSATION_GAP_MINUTES`, `CONVERSATION_MIN_MESSAGES` | `config.ts` → `chunker.ts` | Chunking behaviour, described under [/backfill](#the-backfill-command) |
+| `CHUNK_MESSAGE_LIMIT`, `CHUNK_OVERLAP`, `CONVERSATION_GAP_MINUTES`, `CONVERSATION_MIN_MESSAGES` | `config.ts` → `chunker.ts` | Chunking behaviour, described under [Conversation chunking](#conversation-chunking) |
 
 ## How the bot connects to Discord
 
@@ -142,23 +141,15 @@ Integrations). Run it in a server text channel or thread to archive that channel
   ├─ upsertGuild, upsertChannel                   ← ensure FK rows exist (thread's parent first)
   ├─ getBackfillCursor(channel)                   ← last saved message ID, or null
   │
-  ├─ Phase 1: Discord → Postgres
-  │    fetchAllMessages(channel, cursor ?? '0')
-  │      loop: GET 100 messages after `after`
-  │            sort oldest-first → saveMessages() → after = newest ID
-  │            stop when a page has < 100 messages
+  ├─ fetchAllMessages(channel, cursor ?? '0')     ← Discord → Postgres
+  │    loop: GET 100 messages after `after`
+  │          sort oldest-first → saveMessages() → after = newest ID
+  │          stop when a page has < 100 messages
   │
-  ├─ Phase 2: Postgres → chunk files
-  │    delete messageHistoryChannel/<channel>/chunks/ (and legacy messages.jsonl)
-  │    for each stored message, oldest-first:
-  │      strip GIF/image links; skip if nothing left
-  │      ConversationChunker.add() → writes chunks/00001.json, 00002.json, ...
-  │    chunker.flush()
-  │
-  └─ editReply: "saved N new of M fetched … chunked X messages into Y chunks …"
+  └─ editReply: "saved N new of M fetched messages …"
 ```
 
-### Phase 1: fetching history into Postgres
+### Fetching history into Postgres
 
 - **Paging.** Discord returns at most 100 messages per request. `fetchAllMessages` pages
   *forward* with the `after` parameter, starting from snowflake `'0'` (the beginning of time)
@@ -179,18 +170,16 @@ What gets stored per message: ID, channel, guild, author ID, author tag (as it w
 time), raw content, created/edited timestamps. Attachments, embeds and reactions are not
 stored.
 
-### Phase 2: building conversation chunks
+## Conversation chunking
 
-Chunks are rebuilt from **all** of the channel's saved messages on every run (not only new
-ones), so the `chunks/` folder is deleted and rewritten each time. `storedMessages` reads the
-channel from Postgres 1000 rows at a time, oldest-first, skipping rows with `deleted_at` set.
+`src/chunker.ts` holds the pieces for turning saved messages into conversation chunks; no
+command runs them yet. `storedMessages` (in `db.ts`) reads a channel from Postgres 1000 rows at
+a time, oldest-first, skipping rows with `deleted_at` set.
 
-Each message's content is passed through `textContent`, which removes Tenor/Giphy/Klipy links
-and direct links to image/video files. Messages with nothing left (GIF-only, image-only,
-attachment-only) are skipped.
+`textContent` removes Tenor/Giphy/Klipy links and direct links to image/video files. Messages
+with nothing left (GIF-only, image-only, attachment-only) aren't worth chunking.
 
-The remaining messages go through `ConversationChunker` (`src/chunker.ts`), which groups them
-by conversation:
+`ConversationChunker` groups the remaining messages by conversation:
 
 - **Gap split** — if more than `CONVERSATION_GAP_MINUTES` pass between two messages, the
   current conversation ends and the next message starts a fresh chunk.
@@ -198,26 +187,8 @@ by conversation:
   dropped (e.g. a lone "gm"), unless it already had to be split across chunks.
 - **Size split with overlap** — a chunk that reaches `CHUNK_MESSAGE_LIMIT` is closed, and the
   next one starts with the previous chunk's last `CHUNK_OVERLAP` messages, so an exchange that
-  straddles the split appears whole in at least one chunk.
-
-Each finished chunk is written to
-`messageHistoryChannel/<channel-name>/chunks/<index padded to 5 digits>.json`, where the
-folder name is the channel (or thread) name with unsafe characters replaced by `-`:
-
-```json
-{
-  "index": 1,
-  "overlap": 0,
-  "startedAt": "2025-01-01T12:00:00.000Z",
-  "endedAt": "2025-01-01T12:40:00.000Z",
-  "messages": [
-    {"id":"...","author":"user#0","content":"hello","createdAt":"2025-01-01T12:00:00.000Z"},
-    ...
-  ]
-}
-```
-
-`overlap` is how many of the leading messages were carried over from the previous chunk.
+  straddles the split appears whole in at least one chunk. Each chunk's `overlap` field says
+  how many of its leading messages were carried over.
 
 ## Database
 

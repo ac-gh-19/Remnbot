@@ -1,4 +1,3 @@
-import { mkdir, rm, writeFile } from 'node:fs/promises';
 import {
   MessageFlags,
   PermissionFlagsBits,
@@ -7,48 +6,9 @@ import {
   type Message,
   type TextBasedChannel,
 } from 'discord.js';
-import { ConversationChunker, type Chunk } from '../chunker.js';
-import { chunking } from '../config.js';
-import {
-  getBackfillCursor,
-  saveMessages,
-  storedMessages,
-  upsertChannel,
-  upsertGuild,
-} from '../db.js';
+import { getBackfillCursor, saveMessages, upsertChannel, upsertGuild } from '../db.js';
 
 const PAGE_SIZE = 100; // Discord's max per request
-const HISTORY_DIR = new URL('../../messageHistoryChannel/', import.meta.url);
-
-// Channel names are usually safe already, but thread names can contain anything
-function toFolderName(name: string): string {
-  return name.replace(/[^\w.-]+/g, '-').replace(/^[-.]+|-+$/g, '') || 'unnamed';
-}
-
-// GIF hosts, plus any link straight to an image/video file (e.g. Discord attachment URLs)
-const MEDIA_LINK =
-  /https?:\/\/(?:(?:[\w-]+\.)*(?:tenor|giphy|klipy)\.com\/\S*|[^\s?#]+\.(?:gif|gifv|png|jpe?g|webp|mp4|mov)(?:[?#]\S*)?)/gi;
-
-// The text with GIF/image links removed; empty if nothing informative is left
-function textContent(content: string): string {
-  return content.replace(MEDIA_LINK, '').trim();
-}
-
-interface MessageRecord {
-  id: string;
-  author: string;
-  content: string;
-  createdAt: string;
-}
-
-// Pretty-prints a chunk with one message per line, so files stay readable but not huge
-function formatChunk({ messages, ...meta }: Chunk<MessageRecord>): string {
-  const fields = Object.entries(meta).map(
-    ([key, value]) => `  "${key}": ${JSON.stringify(value)},`,
-  );
-  const lines = messages.map((message) => `    ${JSON.stringify(message)}`);
-  return `{\n${fields.join('\n')}\n  "messages": [\n${lines.join(',\n')}\n  ]\n}\n`;
-}
 
 // DMs and group DMs may have no name, so fall back to the channel ID
 function channelName(channel: TextBasedChannel): string {
@@ -122,40 +82,8 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
     saved += await saveMessages(channel.id, messages);
   });
 
-  // Chunks are rebuilt from every saved message, so each run replaces the previous output
-  const folderName = toFolderName(channelName(channel));
-  const channelDir = new URL(`${folderName}/`, HISTORY_DIR);
-  const chunksDir = new URL('chunks/', channelDir);
-  await rm(chunksDir, { recursive: true, force: true });
-  await rm(new URL('messages.jsonl', channelDir), { force: true }); // replaced by the database
-  await mkdir(chunksDir, { recursive: true });
-
-  // One file per chunk, e.g. chunks/00001.json, so they sort in order
-  const chunker = new ConversationChunker<MessageRecord>(chunking, (chunk) =>
-    writeFile(
-      new URL(`${String(chunk.index).padStart(5, '0')}.json`, chunksDir),
-      formatChunk(chunk),
-    ),
-  );
-
-  let chunked = 0;
-  for await (const message of storedMessages(channel.id)) {
-    // Skip GIF/image-only messages (and attachment-only ones with no text)
-    const content = textContent(message.content);
-    if (!content) continue;
-    await chunker.add({
-      id: message.id,
-      author: message.authorName,
-      content,
-      createdAt: message.createdAt.toISOString(),
-    });
-    chunked++;
-  }
-  await chunker.flush();
-
   await interaction.editReply(
     `Done — saved ${saved} new of ${fetched} fetched messages from #${channelName(channel)}` +
-      `${cursor ? ' (resumed from the last backfill)' : ''}. ` +
-      `Chunked ${chunked} text messages into ${chunker.count} chunks in messageHistoryChannel/${folderName}/chunks/.`,
+      `${cursor ? ' (resumed from the last backfill)' : ''}.`,
   );
 }
