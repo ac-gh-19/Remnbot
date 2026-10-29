@@ -91,6 +91,7 @@ export async function authorNames(guildId: string): Promise<Map<string, string>>
 
 export interface StoredMessage {
   id: string;
+  authorId: string;
   authorName: string;
   content: string;
   createdAt: Date;
@@ -105,7 +106,7 @@ export async function* storedMessages(
   let after = '0';
   while (true) {
     const { rows } = await pool.query<StoredMessage>(
-      `SELECT id, author_name AS "authorName", content, created_at AS "createdAt"
+      `SELECT id, author_id AS "authorId", author_name AS "authorName", content, created_at AS "createdAt"
        FROM messages
        WHERE channel_id = $1 AND id > $2 AND deleted_at IS NULL
        ORDER BY id

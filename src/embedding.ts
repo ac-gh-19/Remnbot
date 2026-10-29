@@ -5,8 +5,10 @@ import { voyageApiKey } from './config.js';
 export const EMBEDDING_MODEL = 'voyage-4';
 export const EMBEDDING_DIMENSIONS = 1024;
 
-// A message as read from the messages table
+// A message as read from the messages table. authorName is the name when it was sent;
+// transcripts label the author by their latest name instead, found through authorId.
 export interface ChatMessage {
+  authorId: string;
   authorName: string;
   content: string;
 }
@@ -19,7 +21,8 @@ export interface Conversation {
   messages: ChatMessage[];
 }
 
-// Names to put in place of Discord's raw <@id>, <@&id> and <#id> markup
+// Names to put in place of Discord's raw <@id>, <@&id> and <#id> markup. users also labels
+// each message's author, so a renamed person goes by one name throughout a transcript.
 export interface MentionNames {
   users: ReadonlyMap<string, string>;
   roles?: ReadonlyMap<string, string>;
@@ -79,11 +82,12 @@ export function formatChunkForSummarizing(
     const text = readableContent(message.content, names);
     if (!text) continue;
 
+    const author = names.users.get(message.authorId) ?? message.authorName;
     const last = turns.at(-1);
-    if (last && last.author === message.authorName && last.text === text) {
+    if (last && last.author === author && last.text === text) {
       last.count++;
     } else {
-      turns.push({ author: message.authorName, text, count: 1 });
+      turns.push({ author, text, count: 1 });
     }
   }
 
