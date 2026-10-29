@@ -21,6 +21,37 @@ export const databaseUrl = DATABASE_URL;
 // Optional so the bot runs without it; creating embeddings throws if it's missing
 export const voyageApiKey = process.env.VOYAGE_API_KEY;
 
+// Models that can summarize conversations, picked by name with SUMMARY_MODEL. The Anthropic
+// SDK reads ANTHROPIC_API_KEY itself; it's only needed to summarize.
+export interface SummaryModel {
+  id: string;
+  // How hard the model thinks before answering; more effort costs more tokens
+  effort: 'low' | 'medium' | 'high';
+  // Whether the API may rerun a request on another model when this one declines it. Haiku has
+  // no server-side fallback.
+  fallbacks: boolean;
+}
+
+export const summaryModels = {
+  opus: { id: 'claude-opus-5-5', effort: 'medium', fallbacks: true },
+  sonnet: { id: 'claude-sonnet-5-5', effort: 'medium', fallbacks: true },
+  haiku: { id: 'claude-haiku-5-5', effort: 'medium', fallbacks: false },
+} satisfies Record<string, SummaryModel>;
+
+export type SummaryModelName = keyof typeof summaryModels;
+
+function isSummaryModelName(name: string): name is SummaryModelName {
+  return Object.hasOwn(summaryModels, name);
+}
+
+const summaryModelName = process.env.SUMMARY_MODEL || 'opus';
+if (!isSummaryModelName(summaryModelName)) {
+  throw new Error(
+    `SUMMARY_MODEL must be one of ${Object.keys(summaryModels).join(', ')}, got "${summaryModelName}"`,
+  );
+}
+export const summaryModel: SummaryModel = summaryModels[summaryModelName];
+
 export const chunkingOptions: ChunkingOptions = {
   // Most messages a single chunk can hold
   messageLimit: intFromEnv('CHUNK_MESSAGE_LIMIT', 300),
