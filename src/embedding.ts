@@ -1,4 +1,3 @@
-import type { Chunk } from './chunker.js';
 import { voyageApiKey } from './config.js';
 
 // Changing either means re-embedding everything, and the dimension has to match the pgvector
@@ -6,10 +5,18 @@ import { voyageApiKey } from './config.js';
 export const EMBEDDING_MODEL = 'voyage-4';
 export const EMBEDDING_DIMENSIONS = 1024;
 
+// A message as read from the messages table
 export interface ChatMessage {
-  author: string;
+  authorName: string;
   content: string;
-  createdAt: string;
+}
+
+// A chunk as read from the chunks table, with its messages loaded. pg returns timestamptz
+// columns as Dates.
+export interface Conversation {
+  startedAt: Date;
+  endedAt: Date;
+  messages: ChatMessage[];
 }
 
 // Names to put in place of Discord's raw <@id>, <@&id> and <#id> markup
@@ -49,7 +56,7 @@ function readableContent(content: string, names: MentionNames): string {
 }
 
 // "2022-05-26 05:35"
-const minute = (iso: string): string => iso.slice(0, 16).replace('T', ' ');
+const minute = (date: Date): string => date.toISOString().slice(0, 16).replace('T', ' ');
 
 // Renders a chunk as a plain transcript for the LLM that summarizes it:
 //
@@ -63,25 +70,25 @@ const minute = (iso: string): string => iso.slice(0, 16).replace('T', ' ');
 // same person (ping spam, copy-paste) becomes one line with a count instead of drowning out
 // the rest of the conversation.
 export function formatChunkForSummarizing(
-  chunk: Chunk<ChatMessage>,
+  conversation: Conversation,
   names: MentionNames,
   channelName?: string,
 ): string {
   const turns: { author: string; text: string; count: number }[] = [];
-  for (const message of chunk.messages) {
+  for (const message of conversation.messages) {
     const text = readableContent(message.content, names);
     if (!text) continue;
 
     const last = turns.at(-1);
-    if (last && last.author === message.author && last.text === text) {
+    if (last && last.author === message.authorName && last.text === text) {
       last.count++;
     } else {
-      turns.push({ author: message.author, text, count: 1 });
+      turns.push({ author: message.authorName, text, count: 1 });
     }
   }
 
   const where = channelName ? ` in #${channelName}` : '';
-  const header = `Conversation${where}, ${minute(chunk.startedAt)} to ${minute(chunk.endedAt)} UTC`;
+  const header = `Conversation${where}, ${minute(conversation.startedAt)} to ${minute(conversation.endedAt)} UTC`;
   const lines = turns.map(
     ({ author, text, count }) => `${author}: ${text}${count > 1 ? ` (x${count})` : ''}`,
   );
