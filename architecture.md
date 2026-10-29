@@ -219,7 +219,9 @@ need summarizing again).
   `first_message_id` to `last_message_id`. `content_hash` (sha256 of each message's ID and
   text) identifies a chunk across rebuilds, so an unchanged chunk keeps its `summary` and
   `embedding` (a pgvector `vector(1024)`). Both start as NULL, which is how pending work is
-  found. `search_tsv` indexes the summary for keyword search.
+  found. Alongside the summary are the rest of the summarizer's output: `topics`, `entities`
+  (JSONB), `substance` (`low`/`medium`/`high`) and `outcome`, kept so the embedded text can
+  be rebuilt without summarizing again. `search_tsv` indexes the summary for keyword search.
 
 The schema isn't applied automatically; create the database and run it once:
 

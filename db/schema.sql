@@ -59,6 +59,13 @@ CREATE TABLE IF NOT EXISTS chunks (
   UNIQUE (channel_id, content_hash)
 );
 
+-- The rest of the summarizer's output. Kept so the embedded text can be rebuilt (and re-embedded)
+-- without summarizing again. Added with ALTER so re-running this file updates existing databases.
+ALTER TABLE chunks ADD COLUMN IF NOT EXISTS entities JSONB;     -- [{"name": "Elden Ring", "type": "game"}, ...]
+ALTER TABLE chunks ADD COLUMN IF NOT EXISTS substance TEXT
+  CHECK (substance IN ('low', 'medium', 'high'));
+ALTER TABLE chunks ADD COLUMN IF NOT EXISTS outcome TEXT;       -- NULL when there was none, or before summarizing
+
 CREATE INDEX IF NOT EXISTS chunks_embedding_idx ON chunks USING hnsw (embedding vector_cosine_ops);
 CREATE INDEX IF NOT EXISTS chunks_search_tsv_idx ON chunks USING gin (search_tsv);
 CREATE INDEX IF NOT EXISTS chunks_channel_id_first_message_id_idx ON chunks (channel_id, first_message_id);
