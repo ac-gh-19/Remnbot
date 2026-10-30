@@ -2,7 +2,6 @@ import Anthropic from '@anthropic-ai/sdk';
 import { betaZodOutputFormat } from '@anthropic-ai/sdk/helpers/beta/zod';
 import { z } from 'zod';
 import { summaryModel, type SummaryModel } from '../config.js';
-import { formatChunkForSummarizing, type Conversation, type MentionNames } from '../embedding.js';
 
 const ENTITY_TYPES = [
   'person',
@@ -42,11 +41,10 @@ Only report what the transcript supports. Don't guess at things it doesn't say.`
 let client: Anthropic | undefined;
 
 // Summarizes a conversation, along with its topics, the entities it mentions, how substantive
-// it is and what it led to
+// it is and what it led to. `transcript` is a chunk as formatChunkForSummarizing renders it,
+// which is the format SYSTEM_PROMPT describes.
 export async function summarizeConversation(
-  conversation: Conversation,
-  names: MentionNames,
-  channelName?: string,
+  transcript: string,
   model: SummaryModel = summaryModel,
 ): Promise<ConversationSummary> {
   client ??= new Anthropic();
@@ -55,9 +53,7 @@ export async function summarizeConversation(
     model: model.id,
     max_tokens: 16000,
     system: SYSTEM_PROMPT,
-    messages: [
-      { role: 'user', content: formatChunkForSummarizing(conversation, names, channelName) },
-    ],
+    messages: [{ role: 'user', content: transcript }],
     output_config: { effort: model.effort, format: betaZodOutputFormat(ConversationSummarySchema) },
     ...(model.fallbacks && { betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' }),
   });
