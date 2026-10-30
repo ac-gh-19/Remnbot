@@ -20,7 +20,6 @@ interface ChunkMessage {
 
 // What buildChunks needs to print each chunk as it's built
 export interface ChunkLog {
-  channelName: string;
   names: MentionNames;
 }
 
@@ -32,7 +31,7 @@ const RULE = '='.repeat(80);
 //   ================================================================================
 //   chunk 12 · 64 messages (20 carried over from chunk 11) · 1f3a9c2e
 //   ================================================================================
-//   Conversation in #general, 2022-05-26 05:35 to 2022-05-26 06:44 UTC
+//   Conversation, 2022-05-26 05:35 to 2022-05-26 06:44 UTC
 //
 //   alice: did anyone see @bob's clip :POGGERS:
 //   ...
@@ -41,13 +40,12 @@ function logChunk(
   overlap: number,
   messages: ChunkMessage[],
   row: ChunkRow,
-  { channelName, names }: ChunkLog,
+  { names }: ChunkLog,
 ): void {
   const carried = overlap > 0 ? ` (${overlap} carried over from chunk ${index - 1})` : '';
   const transcript = formatChunkForSummarizing(
     { startedAt: new Date(row.startedAt), endedAt: new Date(row.endedAt), messages },
     names,
-    channelName,
   );
   console.log(
     `${RULE}\nchunk ${index} · ${messages.length} messages${carried} · ${row.contentHash.slice(0, 8)}\n${RULE}\n${transcript}\n`,
@@ -132,7 +130,6 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
   const { chunks, messageCount } = await buildChunks(channel.id, {
-    channelName: channel.name,
     names: { users: await authorNames(interaction.guildId) },
   });
   const { inserted, deleted } = await replaceChunks(channel.id, interaction.guildId, chunks);

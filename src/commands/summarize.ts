@@ -29,12 +29,12 @@ interface BatchResult {
   failed: number;
 }
 
-// Summarizes a chunk from its saved messages, filtered the same way /chunk filtered them
+// Summarizes a chunk from its saved messages, filtered the same way /chunk filtered them. The
+// channel name is left out of the transcript so the model doesn't open every summary with it.
 async function summarizeChunk(
   channelId: string,
   chunk: PendingChunk,
   names: MentionNames,
-  channelName: string,
 ): Promise<ConversationSummary> {
   const messages = [];
   for (const message of await messagesBetween(
@@ -48,7 +48,6 @@ async function summarizeChunk(
   const transcript = formatChunkForSummarizing(
     { startedAt: chunk.startedAt, endedAt: chunk.endedAt, messages },
     names,
-    channelName,
   );
   return summarizeConversation(transcript);
 }
@@ -68,7 +67,7 @@ async function processBatch(
     batch.map(async (chunk) => {
       if (chunk.summary) return chunk.summary;
       try {
-        const summary = await summarizeChunk(channelId, chunk, names, channelName);
+        const summary = await summarizeChunk(channelId, chunk, names);
         await saveChunkSummary(chunk.id, summary);
         result.summarized++;
         console.log(`[summarize] #${channelName}: chunk ${chunk.id} (${summary.substance})`);
