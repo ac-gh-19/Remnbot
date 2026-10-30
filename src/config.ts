@@ -54,13 +54,13 @@ export const summaryModel: SummaryModel = summaryModels[summaryModelName];
 
 export const chunkingOptions: ChunkingOptions = {
   // Most messages a single chunk can hold
-  messageLimit: intFromEnv('CHUNK_MESSAGE_LIMIT', 300),
+  messageLimit: intFromEnv('CHUNK_MESSAGE_LIMIT', 150),
   // Messages repeated from the end of a full chunk at the start of the next one
-  overlap: intFromEnv('CHUNK_OVERLAP', 50),
+  overlap: intFromEnv('CHUNK_OVERLAP', 25),
   // Silence longer than this ends a conversation and starts a fresh chunk
   gapMinutes: intFromEnv('CONVERSATION_GAP_MINUTES', 60),
   // Conversations with fewer messages than this are dropped (e.g. a lone "gm")
-  minMessages: intFromEnv('CONVERSATION_MIN_MESSAGES', 20),
+  minMessages: intFromEnv('CONVERSATION_MIN_MESSAGES', 10),
 };
 
 if (chunkingOptions.messageLimit < 1) {
