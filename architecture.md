@@ -184,6 +184,20 @@ chunks from **all** its saved messages and syncs them into the `chunks` table.
 `storedMessages` (in `db.ts`) reads a channel from Postgres 1000 rows at a time, oldest-first,
 skipping rows with `deleted_at` set.
 
+Messages from bots (`author_is_bot`) are skipped too: level-ups, music queues, Wordle results
+and the like aren't conversation. They're still saved by `/backfill`, so the archive stays
+complete. Messages saved before `author_is_bot` existed default to `false`, and `/backfill` only
+fetches new messages, so a database from before then needs a one-time fill. Bots' tags still
+carry a `#1234` discriminator while migrated users' don't, which finds them:
+
+```sql
+UPDATE messages SET author_is_bot = true WHERE author_name LIKE '%#%';
+```
+
+Check the matched names first (`SELECT DISTINCT author_name ...`): a user who never migrated to
+the new username system also has one. Re-run `/chunk` afterwards; chunks that held bot
+messages get new hashes and are replaced.
+
 `textContent` removes Tenor/Giphy/Klipy links and direct links to image/video files. Messages
 with nothing left (GIF-only, image-only, attachment-only) aren't worth chunking.
 

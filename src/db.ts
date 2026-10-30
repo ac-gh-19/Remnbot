@@ -50,10 +50,10 @@ export async function saveMessages(channelId: string, messages: Message[]): Prom
 
   const { rows } = await pool.query<{ inserted: number }>(
     `WITH inserted AS (
-       INSERT INTO messages (id, channel_id, guild_id, author_id, author_name, content, created_at, edited_at)
+       INSERT INTO messages (id, channel_id, guild_id, author_id, author_name, author_is_bot, content, created_at, edited_at)
        SELECT * FROM unnest(
          $1::bigint[], $2::bigint[], $3::bigint[], $4::bigint[],
-         $5::text[], $6::text[], $7::timestamptz[], $8::timestamptz[]
+         $5::text[], $11::boolean[], $6::text[], $7::timestamptz[], $8::timestamptz[]
        )
        ON CONFLICT (id) DO NOTHING
        RETURNING 1
@@ -72,6 +72,7 @@ export async function saveMessages(channelId: string, messages: Message[]): Prom
       messages.map((m) => m.editedAt?.toISOString() ?? null),
       last.id,
       channelId,
+      messages.map((m) => m.author.bot),
     ],
   );
   return rows[0]?.inserted ?? 0;
@@ -99,7 +100,8 @@ export interface StoredMessage {
 }
 
 // Walks a channel's saved messages oldest-first, a page at a time so large channels
-// aren't loaded into memory all at once
+// aren't loaded into memory all at once. Bots' messages are skipped: they're level-ups, music
+// queues and game output, not conversation.
 export async function* storedMessages(
   channelId: string,
   pageSize = 1000,
@@ -109,7 +111,7 @@ export async function* storedMessages(
     const { rows } = await pool.query<StoredMessage>(
       `SELECT id, author_id AS "authorId", author_name AS "authorName", content, created_at AS "createdAt"
        FROM messages
-       WHERE channel_id = $1 AND id > $2 AND deleted_at IS NULL
+       WHERE channel_id = $1 AND id > $2 AND deleted_at IS NULL AND NOT author_is_bot
        ORDER BY id
        LIMIT $3`,
       [channelId, after, pageSize],
@@ -224,7 +226,8 @@ export async function* pendingChunks(
 }
 
 // The saved messages from firstMessageId to lastMessageId, oldest first: a chunk's messages,
-// before the ones with no text are filtered out
+// before the ones with no text are filtered out. Skips bots, as storedMessages does, so the
+// range holds the same messages /chunk built the chunk from.
 export async function messagesBetween(
   channelId: string,
   firstMessageId: string,
@@ -233,7 +236,7 @@ export async function messagesBetween(
   const { rows } = await pool.query<StoredMessage>(
     `SELECT id, author_id AS "authorId", author_name AS "authorName", content, created_at AS "createdAt"
      FROM messages
-     WHERE channel_id = $1 AND id BETWEEN $2 AND $3 AND deleted_at IS NULL
+     WHERE channel_id = $1 AND id BETWEEN $2 AND $3 AND deleted_at IS NULL AND NOT author_is_bot
      ORDER BY id`,
     [channelId, firstMessageId, lastMessageId],
   );

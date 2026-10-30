@@ -30,6 +30,10 @@ CREATE TABLE IF NOT EXISTS messages (
   deleted_at  TIMESTAMPTZ
 );
 
+-- Bots' messages are kept so the archive is complete, but left out of chunks. Messages saved
+-- before this column existed need filling in once; see "Bot messages" in architecture.md.
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS author_is_bot BOOLEAN NOT NULL DEFAULT false;
+
 CREATE INDEX IF NOT EXISTS messages_channel_id_id_idx ON messages (channel_id, id);
 CREATE INDEX IF NOT EXISTS messages_guild_id_created_at_idx ON messages (guild_id, created_at);
 
