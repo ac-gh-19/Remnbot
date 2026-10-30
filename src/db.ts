@@ -1,6 +1,7 @@
 import pg from 'pg';
 import type { Guild, GuildTextBasedChannel, Message } from 'discord.js';
 import { databaseUrl } from './config.js';
+import type { ConversationSummary } from './services/summarizer.js';
 
 // Shared by every command; BIGINT columns come back as strings, matching discord.js IDs
 export const pool = new pg.Pool({ connectionString: databaseUrl });
@@ -162,4 +163,115 @@ export async function replaceChunks(
     ],
   );
   return rows[0] ?? { inserted: 0, deleted: 0 };
+}
+
+// A chunk that still needs a summary or an embedding. summary is set when only the embedding
+// is missing, so it can be embedded again without paying for a new summary.
+export interface PendingChunk {
+  id: string;
+  firstMessageId: string;
+  lastMessageId: string;
+  startedAt: Date;
+  endedAt: Date;
+  summary: ConversationSummary | null;
+}
+
+// Walks a channel's chunks that aren't embedded with `embeddingModel` yet, oldest first. Chunks
+// that failed to summarize `maxAttempts` times are skipped. Pages by ID, so a chunk that fails
+// again during the walk isn't returned twice.
+export async function* pendingChunks(
+  channelId: string,
+  embeddingModel: string,
+  maxAttempts: number,
+  pageSize = 50,
+): AsyncGenerator<PendingChunk> {
+  let after = '0';
+  while (true) {
+    const { rows } = await pool.query<
+      Omit<PendingChunk, 'summary'> & {
+        summary: string | null;
+        topics: string[] | null;
+        entities: ConversationSummary['entities'] | null;
+        substance: ConversationSummary['substance'] | null;
+        outcome: string | null;
+      }
+    >(
+      `SELECT id, first_message_id AS "firstMessageId", last_message_id AS "lastMessageId",
+              started_at AS "startedAt", ended_at AS "endedAt",
+              summary, topics, entities, substance, outcome
+       FROM chunks
+       WHERE channel_id = $1 AND id > $2
+         AND embedding_model IS DISTINCT FROM $3
+         AND (summary IS NOT NULL OR summary_attempts < $4)
+       ORDER BY id
+       LIMIT $5`,
+      [channelId, after, embeddingModel, maxAttempts, pageSize],
+    );
+    for (const { summary, topics, entities, substance, outcome, ...chunk } of rows) {
+      yield {
+        ...chunk,
+        summary:
+          summary === null || substance === null
+            ? null
+            : { summary, topics: topics ?? [], entities: entities ?? [], substance, outcome },
+      };
+    }
+
+    const last = rows.at(-1);
+    if (!last || rows.length < pageSize) return;
+    after = last.id;
+  }
+}
+
+// The saved messages from firstMessageId to lastMessageId, oldest first: a chunk's messages,
+// before the ones with no text are filtered out
+export async function messagesBetween(
+  channelId: string,
+  firstMessageId: string,
+  lastMessageId: string,
+): Promise<StoredMessage[]> {
+  const { rows } = await pool.query<StoredMessage>(
+    `SELECT id, author_id AS "authorId", author_name AS "authorName", content, created_at AS "createdAt"
+     FROM messages
+     WHERE channel_id = $1 AND id BETWEEN $2 AND $3 AND deleted_at IS NULL
+     ORDER BY id`,
+    [channelId, firstMessageId, lastMessageId],
+  );
+  return rows;
+}
+
+// Saves a chunk's summary, counting it as one more summarizing attempt
+export async function saveChunkSummary(
+  chunkId: string,
+  { summary, topics, entities, substance, outcome }: ConversationSummary,
+): Promise<void> {
+  await pool.query(
+    `UPDATE chunks
+     SET summary = $2, topics = $3, entities = $4, substance = $5, outcome = $6,
+         summary_attempts = summary_attempts + 1
+     WHERE id = $1`,
+    [chunkId, summary, topics, JSON.stringify(entities), substance, outcome],
+  );
+}
+
+// Counts a failed summarizing attempt, so a chunk that keeps failing is eventually skipped
+export async function recordSummaryFailure(chunkId: string): Promise<void> {
+  await pool.query('UPDATE chunks SET summary_attempts = summary_attempts + 1 WHERE id = $1', [
+    chunkId,
+  ]);
+}
+
+// Saves embeddings for several chunks in one statement. pgvector parses the '[1,2,3]' text
+// that JSON.stringify gives a number array.
+export async function saveChunkEmbeddings(
+  embeddings: { chunkId: string; embedding: number[] }[],
+  model: string,
+): Promise<void> {
+  if (embeddings.length === 0) return;
+  await pool.query(
+    `UPDATE chunks SET embedding = e.embedding::vector, embedding_model = $3
+     FROM unnest($1::bigint[], $2::text[]) AS e(id, embedding)
+     WHERE chunks.id = e.id`,
+    [embeddings.map((e) => e.chunkId), embeddings.map((e) => JSON.stringify(e.embedding)), model],
+  );
 }

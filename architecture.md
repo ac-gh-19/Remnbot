@@ -1,8 +1,9 @@
 # Architecture
 
 A Discord bot written in TypeScript on top of [discord.js](https://discord.js.org) v14. It
-has two slash commands: `/backfill` saves a channel's full message history to Postgres, and
-`/chunk` splits a channel's saved messages into conversation "chunks" in the `chunks` table.
+has three slash commands: `/backfill` saves a channel's full message history to Postgres,
+`/chunk` splits a channel's saved messages into conversation "chunks" in the `chunks` table,
+and `/summarize` summarizes and embeds those chunks.
 
 ```
 src/
@@ -12,6 +13,10 @@ src/
     index.ts            Command registry (Map of name -> command module)
     backfill.ts         /backfill
     chunk.ts            /chunk
+    summarize.ts        /summarize
+  services/
+    summarizer.ts       Summarizes a chunk's transcript with Claude
+    summaryEmbedder.ts  Formats a summary for embedding and embeds it
   config.ts             Env-driven settings (DATABASE_URL, chunking options)
   db.ts                 Postgres pool and queries
   chunker.ts            ConversationChunker (groups messages into chunks), textContent filter
@@ -202,6 +207,28 @@ is always safe. Usually only the newest conversation changes between runs.
 
 Changing any chunking setting changes most hashes, so every chunk gets replaced (and would
 need summarizing again).
+
+## Summarizing and embedding (`/summarize`)
+
+`src/commands/summarize.ts`, Manage Server by default. Run it in a channel after `/chunk`.
+`pendingChunks` (in `db.ts`) walks the channel's chunks oldest-first, a page at a time, picking
+those not yet embedded with the current `EMBEDDING_MODEL` and skipping any whose summary has
+failed 3 times (`summary_attempts`).
+
+They're processed 8 at a time:
+
+1. Chunks without a summary have their messages loaded (`messagesBetween`), filtered with
+   `textContent` as `/chunk` did, and are summarized concurrently. Each summary is saved as
+   soon as it arrives; a failure is logged and bumps `summary_attempts`, and the rest carry on.
+2. Every chunk in the batch that now has a summary is embedded in one Voyage request
+   (`embedSummaries`), and the vectors and model name are saved together.
+
+Because summaries are saved before embedding, an embedding failure stops the run without
+losing them: the next run re-embeds from the stored summary fields without summarizing again.
+Changing `EMBEDDING_MODEL` makes every chunk pending again, but only for re-embedding.
+
+A large channel can take longer than the 15 minutes an interaction token lasts; the result is
+always logged, and a reply that can no longer be sent is only logged as a warning.
 
 ## Database
 
