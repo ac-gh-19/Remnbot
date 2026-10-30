@@ -108,27 +108,55 @@ interface VoyageResponse {
   data: { embedding: number[]; index: number }[];
 }
 
+// Rate limits and server errors are retried this many times before embed gives up
+const MAX_RETRIES = 6;
+// Waits double from this after each failure, unless the response says how long to wait
+const BASE_RETRY_DELAY_MS = 5_000;
+const MAX_RETRY_DELAY_MS = 60_000;
+
+// How long to wait before retrying: the Retry-After header if there is one (in seconds),
+// otherwise an exponential backoff.
+function retryDelay(response: Response, retry: number): number {
+  const retryAfter = Number(response.headers.get('retry-after'));
+  if (retryAfter > 0) return Math.min(retryAfter * 1000, MAX_RETRY_DELAY_MS);
+  return Math.min(BASE_RETRY_DELAY_MS * 2 ** retry, MAX_RETRY_DELAY_MS);
+}
+
 // Embeds texts in a single request (voyage-4 takes up to 1,000 texts and 320K tokens per
 // request) and returns one vector per text, in the same order. A text longer than the model's
-// context length is cut off rather than rejected.
+// context length is cut off rather than rejected. Rate limits (429) and server errors (5xx)
+// are retried after a wait; any other error is thrown straight away.
 export async function embed(texts: string[], inputType: InputType): Promise<number[][]> {
   if (!voyageApiKey) throw new Error('VOYAGE_API_KEY must be set to create embeddings');
   if (texts.length === 0) return [];
 
-  const response = await fetch('https://api.voyageai.com/v1/embeddings', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${voyageApiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      input: texts,
-      model: EMBEDDING_MODEL,
-      input_type: inputType,
-      output_dimension: EMBEDDING_DIMENSIONS,
-    }),
-  });
-  if (!response.ok) {
-    throw new Error(`Voyage embeddings failed (${response.status}): ${await response.text()}`);
-  }
+  for (let retry = 0; ; retry++) {
+    // The key is a MongoDB Atlas key, which only works on Atlas's endpoint, not api.voyageai.com
+    const response = await fetch('https://ai.mongodb.com/v1/embeddings', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${voyageApiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        input: texts,
+        model: EMBEDDING_MODEL,
+        input_type: inputType,
+        output_dimension: EMBEDDING_DIMENSIONS,
+      }),
+    });
+    if (response.ok) {
+      const { data } = (await response.json()) as VoyageResponse;
+      return data.sort((a, b) => a.index - b.index).map(({ embedding }) => embedding);
+    }
 
-  const { data } = (await response.json()) as VoyageResponse;
-  return data.sort((a, b) => a.index - b.index).map(({ embedding }) => embedding);
+    const body = await response.text();
+    const retryable = response.status === 429 || response.status >= 500;
+    if (!retryable || retry === MAX_RETRIES) {
+      throw new Error(`Voyage embeddings failed (${response.status}): ${body}`);
+    }
+    const delay = retryDelay(response, retry);
+    console.warn(
+      `[embed] Voyage returned ${response.status}; retrying in ${delay / 1000}s ` +
+        `(${retry + 1}/${MAX_RETRIES})`,
+    );
+    await new Promise((resolve) => setTimeout(resolve, delay));
+  }
 }

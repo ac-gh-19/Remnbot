@@ -40,6 +40,17 @@ Only report what the transcript supports. Don't guess at things it doesn't say.`
 
 let client: Anthropic | undefined;
 
+// Whether a summarizing error was the API being busy or unreachable (rate limits, overloads,
+// server and connection errors) rather than something wrong with the request. The SDK has
+// already retried these by the time they're thrown, but a later run can still succeed.
+export function isTransientError(error: unknown): boolean {
+  return (
+    error instanceof Anthropic.RateLimitError ||
+    error instanceof Anthropic.InternalServerError ||
+    error instanceof Anthropic.APIConnectionError
+  );
+}
+
 // Summarizes a conversation, along with its topics, the entities it mentions, how substantive
 // it is and what it led to. `transcript` is a chunk as formatChunkForSummarizing renders it,
 // which is the format SYSTEM_PROMPT describes.
@@ -47,7 +58,9 @@ export async function summarizeConversation(
   transcript: string,
   model: SummaryModel = summaryModel,
 ): Promise<ConversationSummary> {
-  client ??= new Anthropic();
+  // Rate limits and overloads are retried with backoff, honouring retry-after; more retries than
+  // the default 2, since a /summarize run sends several requests at once
+  client ??= new Anthropic({ maxRetries: 5 });
 
   const response = await client.beta.messages.parse({
     model: model.id,

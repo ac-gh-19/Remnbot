@@ -15,7 +15,11 @@ import {
   type PendingChunk,
 } from '../db.js';
 import { EMBEDDING_MODEL, formatChunkForSummarizing, type MentionNames } from '../embedding.js';
-import { summarizeConversation, type ConversationSummary } from '../services/summarizer.js';
+import {
+  isTransientError,
+  summarizeConversation,
+  type ConversationSummary,
+} from '../services/summarizer.js';
 import { embedSummaries } from '../services/summaryEmbedder.js';
 
 // Chunks summarized at the same time, and then embedded together in one request
@@ -73,7 +77,9 @@ async function processBatch(
         console.log(`[summarize] #${channelName}: chunk ${chunk.id} (${summary.substance})`);
         return summary;
       } catch (error) {
-        await recordSummaryFailure(chunk.id);
+        // Only failures that point at the chunk itself count towards skipping it for good;
+        // a rate limit or outage says nothing about whether it can be summarized
+        if (!isTransientError(error)) await recordSummaryFailure(chunk.id);
         result.failed++;
         console.error(`[summarize] #${channelName}: chunk ${chunk.id} failed:`, error);
         return null;
@@ -158,7 +164,7 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
       : `Done — summarized ${totals.summarized} and embedded ${totals.embedded} chunks in #${channel.name}` +
         (totals.failed
           ? `. ${totals.failed} failed to summarize and will be retried next run ` +
-            `(up to ${MAX_SUMMARY_ATTEMPTS} attempts each).`
+            `(up to ${MAX_SUMMARY_ATTEMPTS} attempts each; rate limits and outages don't count).`
           : '.');
   console.log(`[summarize] ${message}`);
 
