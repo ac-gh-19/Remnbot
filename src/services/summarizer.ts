@@ -30,11 +30,11 @@ export type ConversationSummary = z.infer<typeof ConversationSummarySchema>;
 const SYSTEM_PROMPT = `You summarize Discord conversations so they can be searched and recalled later. You get a transcript with one message per line as "author: text". "(xN)" means the same message was sent N times in a row, and links appear as [link: site/path].
 
 Return:
-- summary: 2-5 sentences on what was discussed and who said what that mattered. Use people's names as they appear in the transcript. Write it so someone who wasn't there understands it.
+- summary: 2-5 sentences on what was discussed and who said what that mattered. Refer to people by their names as they appear in the transcript, not by pronouns. Write it so someone who wasn't there understands it. Describe what happened, not what didn't: leave whether anything was decided or resolved to outcome.
 - topics: the main subjects, as short lowercase phrases (e.g. "elden ring dlc", "weekend trip planning"). Leave out passing mentions.
-- entities: the specific people, places and things named or clearly referred to: games, movies, shows, music, books, products, organizations, events. Include the conversation's participants only when the conversation is about them, not just because they spoke. One entry per entity, using its most complete name.
+- entities: the specific people, places and things named or clearly referred to: games, movies, shows, music, books, products, organizations, events. Include the conversation's participants only when the conversation is about them, not just because they spoke. One entry per entity, using its most complete name and nothing else: no notes or caveats in the name.
 - substance: how much real content the conversation has. "low" for greetings, memes, reactions, spam or one-liners that go nowhere; "medium" for a real exchange on a subject without much depth or resolution; "high" for detailed discussion, useful information, plans or decisions.
-- outcome: what the conversation came to, if anything, such as a decision the group made, a plan agreed on, a question answered or how things ended up. null when it just drifts off without one.
+- outcome: one sentence on what the conversation came to, if anything, such as a decision the group made, a plan agreed on, a question answered or how things ended up. Only what it reached: if part of it was resolved, describe just that part, and leave out what wasn't. null when it just drifts off without one.
 
 Only report what the transcript supports. Don't guess at things it doesn't say.`;
 
