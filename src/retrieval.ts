@@ -1,8 +1,8 @@
-// The search behind `npm run search` and `npm run eval`: finds the conversations that best answer
+// The search behind `/ask`, `npm run search` and `npm run eval`: finds the conversations that best answer
 // a question three ways (by summary embedding, by window embedding, by keyword over raw
 // messages) and merges the three ranked lists with reciprocal rank fusion.
 import { textContent } from './chunker.js';
-import { authorNames, messagesBetween, pool } from './db.js';
+import { authorNames, messagesBetween, pool, type StoredMessage } from './db.js';
 import { EMBEDDING_MODEL, embed, formatTranscriptLines, type MentionNames } from './embedding.js';
 
 export const RESULT_LIMIT = 10;
@@ -142,17 +142,29 @@ const AUTHOR_FILTER = `($3::bigint[] IS NULL OR EXISTS (
     AND m.author_id = ANY($3)
 ))`;
 
+// Only chunks in these channels ($5); null allows every channel. c is the chunk.
+const CHANNEL_FILTER = `($5::bigint[] IS NULL OR c.channel_id = ANY($5))`;
+
+// Who and where a search is limited to; null on either means no limit
+interface SearchFilter {
+  authorIds: string[] | null;
+  channelIds: string[] | null;
+}
+
 // The chunks whose summary embeddings are closest to the question's, best first. Only rows
 // embedded with the current model are compared, here and in windowSearch, since vectors from
 // different models don't share a space.
-async function summarySearch(vector: number[], authorIds: string[] | null): Promise<string[]> {
+async function summarySearch(
+  vector: number[],
+  { authorIds, channelIds }: SearchFilter,
+): Promise<string[]> {
   const rows = await nearest<{ id: string }>(
     `SELECT c.id
      FROM chunks c
-     WHERE c.embedding_model = $2 AND ${AUTHOR_FILTER}
+     WHERE c.embedding_model = $2 AND ${AUTHOR_FILTER} AND ${CHANNEL_FILTER}
      ORDER BY c.embedding <=> $1::vector
      LIMIT $4`,
-    [JSON.stringify(vector), EMBEDDING_MODEL, authorIds, CANDIDATE_LIMIT],
+    [JSON.stringify(vector), EMBEDDING_MODEL, authorIds, CANDIDATE_LIMIT, channelIds],
   );
   return rows.map(({ id }) => id);
 }
@@ -173,16 +185,20 @@ export interface WindowHit {
 // nearest window. Fetches the WINDOW_LIMIT nearest windows and keeps each chunk the first time
 // one of its windows appears, up to CANDIDATE_LIMIT chunks. The author filter is the summary
 // search's: the person wrote somewhere in the conversation, not necessarily in the window.
-async function windowSearch(vector: number[], authorIds: string[] | null): Promise<WindowHit[]> {
+async function windowSearch(
+  vector: number[],
+  { authorIds, channelIds }: SearchFilter,
+): Promise<WindowHit[]> {
   const rows = await nearest<WindowRange & { chunkId: string }>(
     `SELECT w.chunk_id AS "chunkId", w.channel_id AS "channelId",
             w.first_message_id AS "firstMessageId", w.last_message_id AS "lastMessageId"
      FROM windows w
      JOIN chunks c ON c.id = w.chunk_id
-     WHERE w.embedding_model = $2 AND c.summary IS NOT NULL AND ${AUTHOR_FILTER}
+     WHERE w.embedding_model = $2 AND c.summary IS NOT NULL
+       AND ${AUTHOR_FILTER} AND ${CHANNEL_FILTER}
      ORDER BY w.embedding <=> $1::vector
      LIMIT $4`,
-    [JSON.stringify(vector), EMBEDDING_MODEL, authorIds, WINDOW_LIMIT],
+    [JSON.stringify(vector), EMBEDDING_MODEL, authorIds, WINDOW_LIMIT, channelIds],
   );
 
   const hits = new Map<string, WindowHit>();
@@ -205,8 +221,12 @@ export interface KeywordHit {
 // by & (every term required). That's too strict for a whole question, so the &s become |s and any
 // term matches; ts_rank then scores messages that match more of the terms, or match them more
 // often, higher. A chunk ranks by its best message, with ties going to the chunk with more
-// matching messages. When authors are given, only their messages are searched.
-async function keywordSearch(text: string, authorIds: string[] | null): Promise<KeywordHit[]> {
+// matching messages. When authors are given, only their messages are searched; when channels are,
+// only messages in them.
+async function keywordSearch(
+  text: string,
+  { authorIds, channelIds }: SearchFilter,
+): Promise<KeywordHit[]> {
   const { rows } = await pool.query<KeywordHit>(
     `WITH query AS (
        SELECT replace(websearch_to_tsquery('english', $1)::text, ' & ', ' | ')::tsquery AS q
@@ -216,6 +236,7 @@ async function keywordSearch(text: string, authorIds: string[] | null): Promise<
        WHERE m.search_tsv @@ query.q
          AND m.deleted_at IS NULL AND NOT m.author_is_bot
          AND ($2::bigint[] IS NULL OR m.author_id = ANY($2))
+         AND ($4::bigint[] IS NULL OR m.channel_id = ANY($4))
      )
      SELECT c.id,
             (array_agg(h.author_name || ': ' || h.content ORDER BY h.rank DESC))[1] AS "bestMatch"
@@ -226,7 +247,7 @@ async function keywordSearch(text: string, authorIds: string[] | null): Promise<
      GROUP BY c.id
      ORDER BY max(h.rank) DESC, count(*) DESC
      LIMIT $3`,
-    [text, authorIds, CANDIDATE_LIMIT],
+    [text, authorIds, CANDIDATE_LIMIT, channelIds],
   );
   return rows;
 }
@@ -251,17 +272,22 @@ export interface SearchLists {
 }
 
 // Runs the summary, window and keyword searches for a question. The question is embedded once
-// and its vector shared by the summary and window searches.
-export async function searchLists(question: string): Promise<SearchLists> {
+// and its vector shared by the summary and window searches. `channelIds` limits all three
+// searches to those channels (/ask passes the ones the asker can view); null searches every
+// channel.
+export async function searchLists(
+  question: string,
+  channelIds: string[] | null = null,
+): Promise<SearchLists> {
   const { semanticText, keywordText, authors } = await parseQuestion(question);
-  const authorIds = authors?.map(({ id }) => id) ?? null;
+  const filter: SearchFilter = { authorIds: authors?.map(({ id }) => id) ?? null, channelIds };
 
   const [vector] = await embed([semanticText], 'query');
   if (!vector) throw new Error('Voyage returned no embedding for the question');
   const [summary, windows, keyword] = await Promise.all([
-    summarySearch(vector, authorIds),
-    windowSearch(vector, authorIds),
-    keywordSearch(keywordText, authorIds),
+    summarySearch(vector, filter),
+    windowSearch(vector, filter),
+    keywordSearch(keywordText, filter),
   ]);
   return { authors, summary, windows, keyword };
 }
@@ -315,14 +341,20 @@ export function fuse(
 export interface ChunkDetails {
   id: string;
   guildId: string;
+  channelId: string;
   channelName: string;
+  firstMessageId: string;
+  lastMessageId: string;
   startedAt: Date;
+  endedAt: Date;
   summary: string;
 }
 
 export async function chunkDetails(ids: string[]): Promise<Map<string, ChunkDetails>> {
   const { rows } = await pool.query<ChunkDetails>(
-    `SELECT c.id, c.guild_id AS "guildId", ch.name AS "channelName", c.started_at AS "startedAt", c.summary
+    `SELECT c.id, c.guild_id AS "guildId", c.channel_id AS "channelId", ch.name AS "channelName",
+            c.first_message_id AS "firstMessageId", c.last_message_id AS "lastMessageId",
+            c.started_at AS "startedAt", c.ended_at AS "endedAt", c.summary
      FROM chunks c
      JOIN channels ch ON ch.id = c.channel_id
      WHERE c.id = ANY($1::bigint[])`,
@@ -334,7 +366,7 @@ export async function chunkDetails(ids: string[]): Promise<Map<string, ChunkDeta
 // Each guild's author names, for labelling window messages the way the summarizer saw them.
 // Loaded once per guild per run.
 const guildNames = new Map<string, Promise<MentionNames>>();
-function namesFor(guildId: string): Promise<MentionNames> {
+export function namesFor(guildId: string): Promise<MentionNames> {
   let names = guildNames.get(guildId);
   if (!names) {
     names = authorNames(guildId).then((users) => ({ users }));
@@ -343,16 +375,22 @@ function namesFor(guildId: string): Promise<MentionNames> {
   return names;
 }
 
-// A window's messages as transcript lines, filtered the way they were when it was embedded
-export async function windowLines(window: WindowRange, guildId: string): Promise<string[]> {
+// A chunk's (or window's) saved messages, filtered the same way /chunk filtered them: no bots
+// (messagesBetween skips them) and no messages that are only GIFs, images or attachments
+export async function chunkMessages(
+  channelId: string,
+  { firstMessageId, lastMessageId }: { firstMessageId: string; lastMessageId: string },
+): Promise<StoredMessage[]> {
   const messages = [];
-  for (const message of await messagesBetween(
-    window.channelId,
-    window.firstMessageId,
-    window.lastMessageId,
-  )) {
+  for (const message of await messagesBetween(channelId, firstMessageId, lastMessageId)) {
     const content = textContent(message.content);
     if (content) messages.push({ ...message, content });
   }
+  return messages;
+}
+
+// A window's messages as transcript lines, filtered the way they were when it was embedded
+export async function windowLines(window: WindowRange, guildId: string): Promise<string[]> {
+  const messages = await chunkMessages(window.channelId, window);
   return formatTranscriptLines(messages, await namesFor(guildId));
 }

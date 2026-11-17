@@ -4,18 +4,15 @@ import {
   SlashCommandBuilder,
   type ChatInputCommandInteraction,
 } from 'discord.js';
-import { textContent } from '../chunker.js';
 import {
   authorNames,
   chunksMissingWindows,
-  messagesBetween,
   pendingChunks,
   recordSummaryFailure,
   saveChunkEmbeddings,
   saveChunkSummary,
   saveWindows,
   type PendingChunk,
-  type StoredMessage,
   type WindowlessChunk,
 } from '../db.js';
 import {
@@ -29,6 +26,7 @@ import {
   summarizeConversation,
   type ConversationSummary,
 } from '../services/summarizer.js';
+import { chunkMessages } from '../retrieval.js';
 import { embedSummaries } from '../services/summaryEmbedder.js';
 import { buildWindows, type Window } from '../windows.js';
 
@@ -45,20 +43,6 @@ interface BatchResult {
   summarized: number;
   embedded: number;
   failed: number;
-}
-
-// A chunk's saved messages, filtered the same way /chunk filtered them: no bots (messagesBetween
-// skips them) and no messages that are only GIFs, images or attachments
-async function chunkMessages(
-  channelId: string,
-  { firstMessageId, lastMessageId }: { firstMessageId: string; lastMessageId: string },
-): Promise<StoredMessage[]> {
-  const messages = [];
-  for (const message of await messagesBetween(channelId, firstMessageId, lastMessageId)) {
-    const content = textContent(message.content);
-    if (content) messages.push({ ...message, content });
-  }
-  return messages;
 }
 
 // Summarizes a chunk from its saved messages. The channel name is left out of the transcript so
