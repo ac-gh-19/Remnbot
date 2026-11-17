@@ -91,6 +91,17 @@ export async function authorNames(guildId: string): Promise<Map<string, string>>
   return new Map(rows.map(({ id, name }) => [id, name]));
 }
 
+// Every saved channel and thread in a guild; parentId is set for threads
+export async function archivedChannels(
+  guildId: string,
+): Promise<{ id: string; parentId: string | null }[]> {
+  const { rows } = await pool.query<{ id: string; parentId: string | null }>(
+    'SELECT id, parent_id AS "parentId" FROM channels WHERE guild_id = $1',
+    [guildId],
+  );
+  return rows;
+}
+
 export interface StoredMessage {
   id: string;
   authorId: string;
