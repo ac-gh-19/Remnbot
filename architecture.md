@@ -3,7 +3,8 @@
 A Discord bot written in TypeScript on top of [discord.js](https://discord.js.org) v14. It
 has three slash commands: `/backfill` saves a channel's full message history to Postgres,
 `/chunk` splits a channel's saved messages into conversation "chunks" in the `chunks` table,
-and `/summarize` summarizes and embeds those chunks.
+and `/summarize` summarizes and embeds those chunks, along with "windows" of about 8 raw
+messages each. `npm run search` answers questions from them.
 
 ```
 src/
@@ -21,7 +22,9 @@ src/
   db.ts                 Postgres pool and queries
   chunker.ts            ConversationChunker (groups messages into chunks), textContent filter
   embedding.ts          Formats chunks as transcripts for summarizing; embeds text with Voyage
-db/schema.sql           Tables: guilds, channels, messages, chunks
+  windows.ts            Cuts a chunk's messages into overlapping windows for embedding
+  search.ts             `npm run search`: summary, window and keyword search merged by RRF
+db/schema.sql           Tables: guilds, channels, messages, chunks, windows
 ```
 
 ## Configuration
@@ -241,12 +244,21 @@ Because summaries are saved before embedding, an embedding failure stops the run
 losing them: the next run re-embeds from the stored summary fields without summarizing again.
 Changing `EMBEDDING_MODEL` makes every chunk pending again, but only for re-embedding.
 
+After the summary batches, a second pass embeds **windows**: every summarized chunk without
+windows for the current `EMBEDDING_MODEL` (`chunksMissingWindows`) has its filtered messages cut
+into windows of 8, a new one every 4, the last ending on the chunk's last message
+(`windowRanges` in `windows.ts`). Each window's text is just its transcript lines
+(`formatTranscriptLines`, shared with the summarizer's transcript), with no header. Whole chunks'
+windows are embedded in requests of up to 500 windows, and each batch replaces those chunks'
+windows in one statement (`saveWindows`) before the next starts. A failed embedding stops the
+run; the next run picks up the chunks still missing windows.
+
 A large channel can take longer than the 15 minutes an interaction token lasts; the result is
 always logged, and a reply that can no longer be sent is only logged as a warning.
 
 ## Database
 
-`db/schema.sql` defines four tables. Discord IDs are 64-bit snowflakes stored as `BIGINT`;
+`db/schema.sql` defines five tables. Discord IDs are 64-bit snowflakes stored as `BIGINT`;
 `pg` returns them as strings, which matches how discord.js represents IDs. It needs the
 [pgvector](https://github.com/pgvector/pgvector) extension (bundled with Postgres.app).
 
@@ -263,6 +275,10 @@ always logged, and a reply that can no longer be sent is only logged as a warnin
   found. Alongside the summary are the rest of the summarizer's output: `topics`, `entities`
   (JSONB), `substance` (`low`/`medium`/`high`) and `outcome`, kept so the embedded text can
   be rebuilt without summarizing again. `search_tsv` indexes the summary for keyword search.
+- `windows` — about 8 consecutive messages of a summarized chunk (`first_message_id` to
+  `last_message_id`), with their `embedding` and `embedding_model`. `chunk_id` cascades, so
+  `/chunk` replacing a chunk deletes its windows. Stores the range, not the text, so what's
+  shown can't drift from the messages.
 
 The schema isn't applied automatically; create the database and run it once:
 

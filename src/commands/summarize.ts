@@ -7,25 +7,39 @@ import {
 import { textContent } from '../chunker.js';
 import {
   authorNames,
+  chunksMissingWindows,
   messagesBetween,
   pendingChunks,
   recordSummaryFailure,
   saveChunkEmbeddings,
   saveChunkSummary,
+  saveWindows,
   type PendingChunk,
+  type StoredMessage,
+  type WindowlessChunk,
 } from '../db.js';
-import { EMBEDDING_MODEL, formatChunkForSummarizing, type MentionNames } from '../embedding.js';
+import {
+  EMBEDDING_MODEL,
+  embed,
+  formatChunkForSummarizing,
+  type MentionNames,
+} from '../embedding.js';
 import {
   isTransientError,
   summarizeConversation,
   type ConversationSummary,
 } from '../services/summarizer.js';
 import { embedSummaries } from '../services/summaryEmbedder.js';
+import { buildWindows, type Window } from '../windows.js';
 
 // Chunks summarized at the same time, and then embedded together in one request
 const BATCH_SIZE = 8;
 // A chunk whose summary has failed this many times is skipped from then on
 const MAX_SUMMARY_ATTEMPTS = 3;
+// Limits on one window-embedding request, well under Voyage's 1,000 texts and 320K tokens. A
+// whole chunk's windows go in one request, so a request can only pass these if one chunk does.
+const MAX_WINDOWS_PER_REQUEST = 500;
+const MAX_WINDOW_CHARS_PER_REQUEST = 400_000;
 
 interface BatchResult {
   summarized: number;
@@ -33,22 +47,28 @@ interface BatchResult {
   failed: number;
 }
 
-// Summarizes a chunk from its saved messages, filtered the same way /chunk filtered them. The
-// channel name is left out of the transcript so the model doesn't open every summary with it.
+// A chunk's saved messages, filtered the same way /chunk filtered them: no bots (messagesBetween
+// skips them) and no messages that are only GIFs, images or attachments
+async function chunkMessages(
+  channelId: string,
+  { firstMessageId, lastMessageId }: { firstMessageId: string; lastMessageId: string },
+): Promise<StoredMessage[]> {
+  const messages = [];
+  for (const message of await messagesBetween(channelId, firstMessageId, lastMessageId)) {
+    const content = textContent(message.content);
+    if (content) messages.push({ ...message, content });
+  }
+  return messages;
+}
+
+// Summarizes a chunk from its saved messages. The channel name is left out of the transcript so
+// the model doesn't open every summary with it.
 async function summarizeChunk(
   channelId: string,
   chunk: PendingChunk,
   names: MentionNames,
 ): Promise<ConversationSummary> {
-  const messages = [];
-  for (const message of await messagesBetween(
-    channelId,
-    chunk.firstMessageId,
-    chunk.lastMessageId,
-  )) {
-    const content = textContent(message.content);
-    if (content) messages.push({ ...message, content });
-  }
+  const messages = await chunkMessages(channelId, chunk);
   const transcript = formatChunkForSummarizing(
     { startedAt: chunk.startedAt, endedAt: chunk.endedAt, messages },
     names,
@@ -105,6 +125,79 @@ async function processBatch(
   return result;
 }
 
+interface WindowedChunk {
+  chunk: WindowlessChunk;
+  windows: Window[];
+}
+
+// Embeds a batch of chunks' windows in one request and saves them. A failed request throws and
+// stops the run: embed() has already retried rate limits and server errors for minutes, so
+// whatever is wrong (a bad key, a used-up quota, an outage) would fail every batch after it.
+async function embedWindowBatch(channelId: string, batch: WindowedChunk[]): Promise<void> {
+  const windows = batch.flatMap(({ chunk, windows }) =>
+    windows.map((window) => ({ chunkId: chunk.id, ...window })),
+  );
+  const embeddings = await embed(
+    windows.map(({ text }) => text),
+    'document',
+  );
+  await saveWindows(
+    channelId,
+    batch.map(({ chunk }) => chunk.id),
+    windows.map(({ chunkId, firstMessageId, lastMessageId }, i) => {
+      const embedding = embeddings[i];
+      if (!embedding)
+        throw new Error(`Voyage returned no embedding for a window of chunk ${chunkId}`);
+      return { chunkId, firstMessageId, lastMessageId, embedding };
+    }),
+    EMBEDDING_MODEL,
+  );
+}
+
+// The window pass: cuts every summarized chunk that has no current-model windows into windows,
+// embeds them in batches and saves each batch before starting the next. Returns how many chunks
+// and windows were embedded.
+export async function embedWindows(
+  channelId: string,
+  names: MentionNames,
+  channelName: string,
+): Promise<{ chunks: number; windows: number }> {
+  const totals = { chunks: 0, windows: 0 };
+  let batch: WindowedChunk[] = [];
+  let batchWindows = 0;
+  let batchChars = 0;
+
+  const run = async (): Promise<void> => {
+    if (batch.length === 0) return;
+    await embedWindowBatch(channelId, batch);
+    totals.chunks += batch.length;
+    totals.windows += batchWindows;
+    console.log(
+      `[summarize] #${channelName}: ${totals.windows} windows embedded for ${totals.chunks} chunks so far`,
+    );
+    batch = [];
+    batchWindows = 0;
+    batchChars = 0;
+  };
+
+  for await (const chunk of chunksMissingWindows(channelId, EMBEDDING_MODEL)) {
+    const windows = buildWindows(await chunkMessages(channelId, chunk), names);
+    const chars = windows.reduce((sum, { text }) => sum + text.length, 0);
+    if (
+      batchWindows + windows.length > MAX_WINDOWS_PER_REQUEST ||
+      batchChars + chars > MAX_WINDOW_CHARS_PER_REQUEST
+    ) {
+      await run();
+    }
+    batch.push({ chunk, windows });
+    batchWindows += windows.length;
+    batchChars += chars;
+  }
+  await run();
+
+  return totals;
+}
+
 export const data = new SlashCommandBuilder()
   .setName('summarize')
   .setDescription("Summarize and embed this channel's conversation chunks")
@@ -157,11 +250,15 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
   }
   if (batch.length > 0) await run(batch);
 
+  // Every chunk summarized so far, in this run or an earlier one, gets its windows
+  const windows = await embedWindows(channel.id, names, channel.name);
+
   const message =
-    totals.embedded === 0 && totals.failed === 0
+    totals.embedded === 0 && totals.failed === 0 && windows.chunks === 0
       ? `Nothing to summarize in #${channel.name} — every chunk is already embedded ` +
         `(or there are none yet: run /chunk here first).`
-      : `Done — summarized ${totals.summarized} and embedded ${totals.embedded} chunks in #${channel.name}` +
+      : `Done — summarized ${totals.summarized} and embedded ${totals.embedded} chunks in #${channel.name}, ` +
+        `plus ${windows.windows} message windows for ${windows.chunks} chunks` +
         (totals.failed
           ? `. ${totals.failed} failed to summarize and will be retried next run ` +
             `(up to ${MAX_SUMMARY_ATTEMPTS} attempts each; rate limits and outages don't count).`
