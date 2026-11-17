@@ -4,3 +4,7 @@ node_modules/
 .DS_Store
 messageHistoryChannel/
 dist/
+
+# Search evaluation: questions and results quote real messages
+eval-questions.json
+eval-results/

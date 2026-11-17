@@ -16,7 +16,8 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "deploy": "tsx src/deploy-commands.ts",
-    "search": "tsx src/search.ts"
+    "search": "tsx src/search.ts",
+    "eval": "tsx src/eval.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.3.0",
