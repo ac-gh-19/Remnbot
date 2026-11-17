@@ -1,31 +1,92 @@
 # Architecture
 
-A Discord bot written in TypeScript on top of [discord.js](https://discord.js.org) v14. It
-has three slash commands: `/backfill` saves a channel's full message history to Postgres,
-`/chunk` splits a channel's saved messages into conversation "chunks" in the `chunks` table,
-and `/summarize` summarizes and embeds those chunks, along with "windows" of about 8 raw
-messages each. `npm run search` answers questions from them.
+A Discord bot (TypeScript, [discord.js](https://discord.js.org) v14) that archives a friend
+group's chat history and makes it searchable by question: "when did we plan the elden ring
+night?", "did @ac ever hit 225 bench?". The sections after this overview go into each part.
 
-```
-src/
-  index.ts              Bot process: logs in, listens for interactions, dispatches commands
-  deploy-commands.ts    One-off script: registers slash commands with Discord
-  commands/
-    index.ts            Command registry (Map of name -> command module)
-    backfill.ts         /backfill
-    chunk.ts            /chunk
-    summarize.ts        /summarize
-  services/
-    summarizer.ts       Summarizes a chunk's transcript with Claude
-    summaryEmbedder.ts  Formats a summary for embedding and embeds it
-  config.ts             Env-driven settings (DATABASE_URL, chunking options)
-  db.ts                 Postgres pool and queries
-  chunker.ts            ConversationChunker (groups messages into chunks), textContent filter
-  embedding.ts          Formats chunks as transcripts for summarizing; embeds text with Voyage
-  windows.ts            Cuts a chunk's messages into overlapping windows for embedding
-  search.ts             `npm run search`: summary, window and keyword search merged by RRF
-db/schema.sql           Tables: guilds, channels, messages, chunks, windows
-```
+## How it works, step by step
+
+From an empty database to an answered question:
+
+1. **`/backfill`** (`commands/backfill.ts`): pages through a channel's history on Discord and
+   saves every message to Postgres. → rows in `messages`.
+2. **`/chunk`** (`commands/chunk.ts` + `chunker.ts`): drops bot and media-only messages and
+   groups the rest into conversations ("chunks"), split by silences and capped at 150 messages.
+   → rows in `chunks`, each a range of message IDs.
+3. **`/summarize`, summary pass** (`commands/summarize.ts` + `services/summarizer.ts`): Claude
+   summarizes each new chunk's transcript (summary, topics, entities, substance, outcome).
+   → summaries on the chunk rows.
+4. **`/summarize`, embedding** (`services/summaryEmbedder.ts` + `embedding.ts`): Voyage turns
+   each summary into a vector. → `chunks.embedding`.
+5. **`/summarize`, window pass** (`windows.ts`): cuts each summarized chunk into overlapping
+   windows of 8 messages and embeds their raw lines. → rows in `windows`.
+6. **`npm run search`, parsing** (`retrieval.ts`): resolves `@name` to a person and builds the
+   question's text for meaning search, its text for keyword search, and an author filter.
+7. **Three searches** (`retrieval.ts`): embeds the question once and finds the nearest
+   summaries, the nearest windows (collapsed to their conversations), and the best keyword
+   matches over raw messages. → three ranked lists of chunks.
+8. **Fusion** (`retrieval.ts`): merges the lists by rank with weighted reciprocal rank fusion.
+   → the top 10 chunks.
+9. **Printing** (`search.ts`): shows each result's channel, date, summary, best window and best
+   keyword match.
+
+`npm run eval` (`eval.ts`) reruns steps 6–8 over a fixed question set to score search quality.
+
+## The parts, by layer
+
+*Discord plumbing*: connects to Discord and routes slash commands; kept apart so commands are
+plain modules.
+- `index.ts`: the bot process. Logs in and sends each slash command to its module.
+- `deploy-commands.ts`: one-off script that registers the commands with Discord.
+- `commands/index.ts`: the command registry (name → module), read by both of the above.
+
+*Commands*: the slash commands that run each processing step.
+- `commands/backfill.ts`, `commands/chunk.ts`, `commands/summarize.ts`: steps 1, 2 and 3–5.
+
+*Text and model calls*: turns messages into text and calls Claude or Voyage; no SQL here.
+- `chunker.ts`: `ConversationChunker` (the grouping rules) and `textContent` (the media filter).
+- `embedding.ts`: transcript formatting (`formatTranscriptLines`, `formatChunkForSummarizing`)
+  and `embed`, the Voyage client with retries.
+- `windows.ts`: the windowing rule and `buildWindows`.
+- `services/summarizer.ts`: the Claude summarizing call. `services/summaryEmbedder.ts`: the
+  text that represents a summary when embedded.
+
+*Storage*: the tables and the queries the commands use, so command code never builds SQL.
+- `db.ts`: the Postgres pool and every query except search's own, which live in `retrieval.ts`.
+- `db/schema.sql`: the five tables (see [Database](#database)).
+
+*Search*: question in, ranked conversations out; the logic is kept apart from the terminal
+output so the eval runs exactly what search runs.
+- `retrieval.ts`: parsing, the three searches (`searchLists`), fusion (`fuse`) and the weights.
+- `search.ts`: the `npm run search` command line. `eval.ts`: the `npm run eval` scorer.
+
+*Settings*: `config.ts` reads `.env` (database URL, chunking options, summary model).
+
+## Key decisions
+
+1. **Rebuild chunks, keep the paid-for work.** `/chunk` regroups every message on each run, and
+   a content hash recognises unchanged chunks so their summaries and embeddings survive.
+   Simpler than updating chunks in place as new messages arrive.
+2. **Store message ranges, not text.** Chunks and windows point at message IDs, so what's shown
+   always matches the archive. The cost is reloading messages to display them.
+3. **Three searches merged by rank.** Summaries match what a conversation was about, windows the
+   specific lines, keywords exact words. Their scores aren't comparable, so only ranks are
+   merged. The weights (window 1, keyword 0.25, `RRF_K` 5) were picked with `npm run eval`, the
+   best of 114 setups for broad questions.
+
+## Terms
+
+- **Chunk**: one conversation, up to 150 messages, ended by a silence of over an hour.
+- **Window**: 8 consecutive messages of a chunk; a new one starts every 4 messages.
+- **Embedding**: a vector from Voyage in which similar meanings land close together.
+- **RRF**: reciprocal rank fusion; each list gives a result weight ÷ (`RRF_K` + rank) points.
+- **Substance**: the summarizer's low/medium/high rating of how much a conversation contains.
+
+## Where to look first
+
+1. `src/commands/summarize.ts`: the processing pipeline, from chunk to summary to windows.
+2. `src/retrieval.ts`: how a question becomes ranked conversations.
+3. `db/schema.sql`: what's stored.
 
 ## Configuration
 
@@ -38,7 +99,9 @@ Everything comes from environment variables, loaded from `.env` by `dotenv/confi
 | `CLIENT_ID` | `deploy-commands.ts` | The application ID that owns the commands |
 | `GUILD_ID` | `deploy-commands.ts` | The server the commands are registered in |
 | `DATABASE_URL` | `config.ts` → `db.ts` | Postgres connection string (required; startup throws without it) |
-| `VOYAGE_API_KEY` | `config.ts` → `embedding.ts` | Voyage AI key for embeddings (optional; only needed to embed) |
+| `VOYAGE_API_KEY` | `config.ts` → `embedding.ts` | Voyage AI key for embeddings (optional; only needed to embed and search) |
+| `ANTHROPIC_API_KEY` | `services/summarizer.ts` (read by the Anthropic SDK) | Claude key for summarizing (only needed by `/summarize`) |
+| `SUMMARY_MODEL` | `config.ts` → `services/summarizer.ts` | `opus` (default), `sonnet` or `haiku` |
 | `CHUNK_MESSAGE_LIMIT`, `CHUNK_OVERLAP`, `CONVERSATION_GAP_MINUTES`, `CONVERSATION_MIN_MESSAGES` | `config.ts` → `chunker.ts` | Chunking behaviour, described under [Conversation chunking](#conversation-chunking-chunk) |
 
 ## How the bot connects to Discord
@@ -256,6 +319,36 @@ run; the next run picks up the chunks still missing windows.
 A large channel can take longer than the 15 minutes an interaction token lasts; the result is
 always logged, and a reply that can no longer be sent is only logged as a warning.
 
+## Searching (`npm run search`)
+
+`src/search.ts` is the command line (one question as arguments, or a prompt loop); the work is
+in `src/retrieval.ts`:
+
+1. `parseQuestion` resolves each `@name` to authors (exact name, then prefix, then substring)
+   and returns the text to embed (names spelled out), the text for keyword search (mentions
+   removed) and an author filter.
+2. `searchLists` embeds the question once and runs three searches, each limited to
+   conversations the named authors wrote in:
+   - **summary**: the 50 chunks whose summary embeddings are nearest the question's;
+   - **window**: the 150 nearest windows, keeping each chunk at its best window, up to 50;
+   - **keyword**: `websearch_to_tsquery` over raw messages with any term matching, a chunk
+     ranked by its best message.
+   The vector searches use pgvector's iterative HNSW scan, so an author filter doesn't starve
+   the results.
+3. `fuse` adds up weight ÷ (`RRF_K` + rank) per list and keeps the top 10. A list with weight 0
+   is left out entirely.
+
+## Measuring search (`npm run eval`)
+
+`src/eval.ts` reads `eval-questions.json`: 80 questions, a broad and a detail one written by
+Claude from each of 40 conversations' raw transcripts, so each question's own conversation is
+its known answer. Each question is searched once with `searchLists`, then merged under every
+setup in `SETUPS` (always including `current`, the weights `npm run search` uses). Scores per
+setup, for all, broad and detail questions: share of answers at #1, share in the top 10, and
+MRR (the average of 1 ÷ rank, 0 outside the top 10). Each run is written to
+`eval-results/<date>[-label].json` with its commit, weights, and every question's ranks. Both
+files quote real messages and are gitignored.
+
 ## Database
 
 `db/schema.sql` defines five tables. Discord IDs are 64-bit snowflakes stored as `BIGINT`;
@@ -297,4 +390,7 @@ cp .env.example .env     # fill in token, IDs, DATABASE_URL
 psql "$DATABASE_URL" -f db/schema.sql
 npm run deploy           # register slash commands in GUILD_ID
 npm run dev              # run the bot with auto-restart (or: npm run build && npm start)
+# in Discord, per channel: /backfill, then /chunk, then /summarize
+npm run search "when did we plan the elden ring night?"
+npm run eval -- <label>  # score search after changing weights
 ```
