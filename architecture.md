@@ -20,8 +20,10 @@ From an empty database to an answered question:
    each summary into a vector. → `chunks.embedding`.
 5. **`/summarize`, window pass** (`windows.ts`): cuts each summarized chunk into overlapping
    windows of 8 messages and embeds their raw lines. → rows in `windows`.
-6. **`npm run search`, parsing** (`retrieval.ts`): resolves `@name` to a person and builds the
+6. **`/ask` or `npm run search`, parsing** (`retrieval.ts`): resolves `@name` to a person and builds the
    question's text for meaning search, its text for keyword search, and an author filter.
+   `/ask` first takes the one-at-a-time lock (`askLock.ts`), turns `<@id>` mentions into
+   `@name`, and limits the search to channels the asker can read.
 7. **Three searches** (`retrieval.ts`): embeds the question once and finds the nearest
    summaries, the nearest windows (collapsed to their conversations), and the best keyword
    matches over raw messages. → three ranked lists of chunks.
@@ -29,6 +31,12 @@ From an empty database to an answered question:
    → the top 10 chunks.
 9. **Printing** (`search.ts`): shows each result's channel, date, summary, best window and best
    keyword match.
+10. **`/ask`, context** (`services/answerContext.ts`): the top 3 chunks as full transcripts and
+    the next 7 as summary + best window + best keyword match, each labelled `[source N]`.
+11. **`/ask`, answer** (`services/answerer.ts` + `commands/ask.ts`): Claude (`ANSWER_MODEL`, no
+    tools) writes an overview from the context only, and says which sources it used. The
+    command posts it publicly as one embed with "@asker asked:", the question, the overview and
+    links to the sources, then releases the lock.
 
 `npm run eval` (`eval.ts`) reruns steps 6–8 over a fixed question set to score search quality.
 
@@ -42,6 +50,8 @@ plain modules.
 
 *Commands*: the slash commands that run each processing step.
 - `commands/backfill.ts`, `commands/chunk.ts`, `commands/summarize.ts`: steps 1, 2 and 3–5.
+- `commands/ask.ts`: steps 6–11 for a question asked in Discord (visibility filter, lock,
+  timeout, the reply embed). `askLock.ts`: the in-memory lock that allows one question at a time.
 
 *Text and model calls*: turns messages into text and calls Claude or Voyage; no SQL here.
 - `chunker.ts`: `ConversationChunker` (the grouping rules) and `textContent` (the media filter).
@@ -50,6 +60,8 @@ plain modules.
 - `windows.ts`: the windowing rule and `buildWindows`.
 - `services/summarizer.ts`: the Claude summarizing call. `services/summaryEmbedder.ts`: the
   text that represents a summary when embedded.
+- `services/answerContext.ts`: search results → the `[source N]` document `/ask` answers from.
+  `services/answerer.ts`: the `/ask` Claude call (system prompt, structured output, abort).
 
 *Storage*: the tables and the queries the commands use, so command code never builds SQL.
 - `db.ts`: the Postgres pool and every query except search's own, which live in `retrieval.ts`.
@@ -57,10 +69,11 @@ plain modules.
 
 *Search*: question in, ranked conversations out; the logic is kept apart from the terminal
 output so the eval runs exactly what search runs.
-- `retrieval.ts`: parsing, the three searches (`searchLists`), fusion (`fuse`) and the weights.
+- `retrieval.ts`: parsing, the three searches (`searchLists`, with an optional channel filter),
+  fusion (`fuse`), the weights, and loading a chunk's messages (`chunkMessages`).
 - `search.ts`: the `npm run search` command line. `eval.ts`: the `npm run eval` scorer.
 
-*Settings*: `config.ts` reads `.env` (database URL, chunking options, summary model).
+*Settings*: `config.ts` reads `.env` (database URL, chunking options, summary and answer models).
 
 ## Key decisions
 
@@ -100,8 +113,9 @@ Everything comes from environment variables, loaded from `.env` by `dotenv/confi
 | `GUILD_ID` | `deploy-commands.ts` | The server the commands are registered in |
 | `DATABASE_URL` | `config.ts` → `db.ts` | Postgres connection string (required; startup throws without it) |
 | `VOYAGE_API_KEY` | `config.ts` → `embedding.ts` | Voyage AI key for embeddings (optional; only needed to embed and search) |
-| `ANTHROPIC_API_KEY` | `services/summarizer.ts` (read by the Anthropic SDK) | Claude key for summarizing (only needed by `/summarize`) |
+| `ANTHROPIC_API_KEY` | `services/summarizer.ts` (read by the Anthropic SDK) | Claude key for summarizing and answering (only needed by `/summarize` and `/ask`) |
 | `SUMMARY_MODEL` | `config.ts` → `services/summarizer.ts` | `opus` (default), `sonnet` or `haiku` |
+| `ANSWER_MODEL` | `config.ts` → `services/answerer.ts` | Model that answers `/ask`: `opus` (default), `sonnet` or `haiku` |
 | `CHUNK_MESSAGE_LIMIT`, `CHUNK_OVERLAP`, `CONVERSATION_GAP_MINUTES`, `CONVERSATION_MIN_MESSAGES` | `config.ts` → `chunker.ts` | Chunking behaviour, described under [Conversation chunking](#conversation-chunking-chunk) |
 
 ## How the bot connects to Discord
@@ -319,7 +333,7 @@ run; the next run picks up the chunks still missing windows.
 A large channel can take longer than the 15 minutes an interaction token lasts; the result is
 always logged, and a reply that can no longer be sent is only logged as a warning.
 
-## Searching (`npm run search`)
+## Searching (`/ask`, `npm run search`)
 
 `src/search.ts` is the command line (one question as arguments, or a prompt loop); the work is
 in `src/retrieval.ts`:
@@ -328,7 +342,8 @@ in `src/retrieval.ts`:
    and returns the text to embed (names spelled out), the text for keyword search (mentions
    removed) and an author filter.
 2. `searchLists` embeds the question once and runs three searches, each limited to
-   conversations the named authors wrote in:
+   conversations the named authors wrote in and, when a channel list is given (`/ask` passes
+   the channels the asker can read), to those channels:
    - **summary**: the 50 chunks whose summary embeddings are nearest the question's;
    - **window**: the 150 nearest windows, keeping each chunk at its best window, up to 50;
    - **keyword**: `websearch_to_tsquery` over raw messages with any term matching, a chunk
@@ -337,6 +352,26 @@ in `src/retrieval.ts`:
    the results.
 3. `fuse` adds up weight ÷ (`RRF_K` + rank) per list and keeps the top 10. A list with weight 0
    is left out entirely.
+
+## Answering questions (`/ask`)
+
+`src/commands/ask.ts` runs the search above for a question asked in Discord and has Claude answer
+it. The full design is in `docs/specs/ask-command.md`.
+
+1. **Lock** (`askLock.ts`): one question at a time across the bot. Anyone who asks while it's
+   held gets a public reply naming whose question is in progress. The lock is released in a
+   `finally`, and a 3-minute timeout aborts the Claude call and posts an error.
+2. **Visibility**: only channels still in the server where the asker has View Channel and Read
+   Message History are searched; a thread counts when its parent does.
+3. **Context** (`services/answerContext.ts`): the top 3 results in full, results 4–10 as
+   summary + best window + best keyword match, labelled `[source N] #channel, date`.
+4. **Answer** (`services/answerer.ts`): the context and question go in `<conversations>` and
+   `<question>` tags, and Claude returns `{ overview, sourcesUsed, answerable }` as structured
+   output. It has no tools, so a message or question can't make the bot do anything.
+5. **Reply**: everything is public and nobody is pinged. The answer, "nothing found" (Claude
+   isn't called) and errors all open with "@asker asked:" and the question; the overview is cut
+   at a line break to fit the embed's 4,096 characters, and the Sources list links to each used
+   conversation's first message.
 
 ## Measuring search (`npm run eval`)
 
