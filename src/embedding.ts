@@ -61,24 +61,18 @@ function readableContent(content: string, names: MentionNames): string {
 // "2022-05-26 05:35"
 const minute = (date: Date): string => date.toISOString().slice(0, 16).replace('T', ' ');
 
-// Renders a chunk as a plain transcript for the LLM that summarizes it:
-//
-//   Conversation in #general, 2022-05-26 05:35 to 2022-05-26 06:44 UTC
+// Renders messages as transcript lines, one per message, so speaker turns stay clear:
 //
 //   alice: did anyone see @bob's clip :POGGERS:
 //   bob: [link: youtube.com/watch]
 //   carol: @everyone (x7)
 //
-// One line per message, so speaker turns stay clear. A run of identical messages from the
-// same person (ping spam, copy-paste) becomes one line with a count instead of drowning out
-// the rest of the conversation.
-export function formatChunkForSummarizing(
-  conversation: Conversation,
-  names: MentionNames,
-  channelName?: string,
-): string {
+// Authors go by their latest name. A run of identical messages from the same person (ping
+// spam, copy-paste) becomes one line with a count instead of drowning out the rest. Shared by
+// summary transcripts and windows, so both name people and links the same way.
+export function formatTranscriptLines(messages: ChatMessage[], names: MentionNames): string[] {
   const turns: { author: string; text: string; count: number }[] = [];
-  for (const message of conversation.messages) {
+  for (const message of messages) {
     const text = readableContent(message.content, names);
     if (!text) continue;
 
@@ -90,12 +84,26 @@ export function formatChunkForSummarizing(
       turns.push({ author, text, count: 1 });
     }
   }
-
-  const where = channelName ? ` in #${channelName}` : '';
-  const header = `Conversation${where}, ${minute(conversation.startedAt)} to ${minute(conversation.endedAt)} UTC`;
-  const lines = turns.map(
+  return turns.map(
     ({ author, text, count }) => `${author}: ${text}${count > 1 ? ` (x${count})` : ''}`,
   );
+}
+
+// Renders a chunk as a plain transcript for the LLM that summarizes it: a header line, a blank
+// line, then formatTranscriptLines:
+//
+//   Conversation in #general, 2022-05-26 05:35 to 2022-05-26 06:44 UTC
+//
+//   alice: did anyone see @bob's clip :POGGERS:
+//   ...
+export function formatChunkForSummarizing(
+  conversation: Conversation,
+  names: MentionNames,
+  channelName?: string,
+): string {
+  const where = channelName ? ` in #${channelName}` : '';
+  const header = `Conversation${where}, ${minute(conversation.startedAt)} to ${minute(conversation.endedAt)} UTC`;
+  const lines = formatTranscriptLines(conversation.messages, names);
   return `${header}\n\n${lines.join('\n')}`;
 }
 

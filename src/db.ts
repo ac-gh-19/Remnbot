@@ -278,3 +278,75 @@ export async function saveChunkEmbeddings(
     [embeddings.map((e) => e.chunkId), embeddings.map((e) => JSON.stringify(e.embedding)), model],
   );
 }
+
+// A summarized chunk, identified by its message range, that needs windows
+export interface WindowlessChunk {
+  id: string;
+  firstMessageId: string;
+  lastMessageId: string;
+}
+
+// Walks a channel's summarized chunks that have no windows embedded with `embeddingModel`,
+// oldest first. A chunk's windows are saved all at once, so a chunk either has a full set for a
+// model or none. Pages by ID, like pendingChunks.
+export async function* chunksMissingWindows(
+  channelId: string,
+  embeddingModel: string,
+  pageSize = 50,
+): AsyncGenerator<WindowlessChunk> {
+  let after = '0';
+  while (true) {
+    const { rows } = await pool.query<WindowlessChunk>(
+      `SELECT c.id, c.first_message_id AS "firstMessageId", c.last_message_id AS "lastMessageId"
+       FROM chunks c
+       WHERE c.channel_id = $1 AND c.id > $2 AND c.summary IS NOT NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM windows w WHERE w.chunk_id = c.id AND w.embedding_model = $3
+         )
+       ORDER BY c.id
+       LIMIT $4`,
+      [channelId, after, embeddingModel, pageSize],
+    );
+    yield* rows;
+
+    const last = rows.at(-1);
+    if (!last || rows.length < pageSize) return;
+    after = last.id;
+  }
+}
+
+export interface WindowRow {
+  chunkId: string;
+  firstMessageId: string;
+  lastMessageId: string;
+  embedding: number[];
+}
+
+// Replaces the windows of every chunk in `chunkIds` with `windows`, in a single statement so a
+// chunk never ends up with part of a set. Windows from an older model are deleted here too.
+export async function saveWindows(
+  channelId: string,
+  chunkIds: string[],
+  windows: WindowRow[],
+  model: string,
+): Promise<void> {
+  if (chunkIds.length === 0) return;
+  await pool.query(
+    `WITH deleted AS (
+       DELETE FROM windows WHERE chunk_id = ANY($2::bigint[])
+     )
+     INSERT INTO windows (chunk_id, channel_id, first_message_id, last_message_id, embedding, embedding_model)
+     SELECT w.chunk_id, $1::bigint, w.first_id, w.last_id, w.embedding::vector, $7
+     FROM unnest($3::bigint[], $4::bigint[], $5::bigint[], $6::text[])
+       AS w(chunk_id, first_id, last_id, embedding)`,
+    [
+      channelId,
+      chunkIds,
+      windows.map((w) => w.chunkId),
+      windows.map((w) => w.firstMessageId),
+      windows.map((w) => w.lastMessageId),
+      windows.map((w) => JSON.stringify(w.embedding)),
+      model,
+    ],
+  );
+}

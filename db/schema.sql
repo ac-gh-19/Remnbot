@@ -73,3 +73,19 @@ ALTER TABLE chunks ADD COLUMN IF NOT EXISTS outcome TEXT;       -- NULL when the
 CREATE INDEX IF NOT EXISTS chunks_embedding_idx ON chunks USING hnsw (embedding vector_cosine_ops);
 CREATE INDEX IF NOT EXISTS chunks_search_tsv_idx ON chunks USING gin (search_tsv);
 CREATE INDEX IF NOT EXISTS chunks_channel_id_first_message_id_idx ON chunks (channel_id, first_message_id);
+
+-- Windows: about 8 consecutive messages of a summarized chunk, embedded as is, so a search can
+-- find a conversation by an exact line its summary left out. Like chunks, a window stores its
+-- message range rather than its text. Deleted along with their chunk when /chunk replaces it.
+CREATE TABLE IF NOT EXISTS windows (
+  id               BIGSERIAL PRIMARY KEY,
+  chunk_id         BIGINT NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
+  channel_id       BIGINT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+  first_message_id BIGINT NOT NULL,
+  last_message_id  BIGINT NOT NULL,
+  embedding        vector(1024) NOT NULL,
+  embedding_model  TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS windows_embedding_idx ON windows USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS windows_chunk_id_idx ON windows (chunk_id);
