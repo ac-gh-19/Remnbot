@@ -21,9 +21,9 @@ export const databaseUrl = DATABASE_URL;
 // Optional so the bot runs without it; creating embeddings throws if it's missing
 export const voyageApiKey = process.env.VOYAGE_API_KEY;
 
-// Models that can summarize conversations, picked by name with SUMMARY_MODEL. The Anthropic
-// SDK reads ANTHROPIC_API_KEY itself; it's only needed to summarize.
-export interface SummaryModel {
+// Claude models the bot can use, picked by name with SUMMARY_MODEL (summaries) and ANSWER_MODEL
+// (/ask answers). The Anthropic SDK reads ANTHROPIC_API_KEY itself; it's only needed for those.
+export interface ClaudeModel {
   id: string;
   // How hard the model thinks before answering; more effort costs more tokens
   effort: 'low' | 'medium' | 'high';
@@ -32,25 +32,31 @@ export interface SummaryModel {
   fallbacks: boolean;
 }
 
-export const summaryModels = {
+export const claudeModels = {
   opus: { id: 'claude-opus-5-5', effort: 'medium', fallbacks: true },
   sonnet: { id: 'claude-sonnet-5-5', effort: 'medium', fallbacks: true },
   haiku: { id: 'claude-haiku-5-5', effort: 'medium', fallbacks: false },
-} satisfies Record<string, SummaryModel>;
+} satisfies Record<string, ClaudeModel>;
 
-export type SummaryModelName = keyof typeof summaryModels;
+export type ClaudeModelName = keyof typeof claudeModels;
 
-function isSummaryModelName(name: string): name is SummaryModelName {
-  return Object.hasOwn(summaryModels, name);
+function isClaudeModelName(name: string): name is ClaudeModelName {
+  return Object.hasOwn(claudeModels, name);
 }
 
-const summaryModelName = process.env.SUMMARY_MODEL || 'opus';
-if (!isSummaryModelName(summaryModelName)) {
-  throw new Error(
-    `SUMMARY_MODEL must be one of ${Object.keys(summaryModels).join(', ')}, got "${summaryModelName}"`,
-  );
+// Reads a model name from the environment, defaulting to opus; startup throws on a bad name
+function modelFromEnv(envName: string): ClaudeModel {
+  const name = process.env[envName] || 'opus';
+  if (!isClaudeModelName(name)) {
+    throw new Error(
+      `${envName} must be one of ${Object.keys(claudeModels).join(', ')}, got "${name}"`,
+    );
+  }
+  return claudeModels[name];
 }
-export const summaryModel: SummaryModel = summaryModels[summaryModelName];
+
+export const summaryModel = modelFromEnv('SUMMARY_MODEL');
+export const answerModel = modelFromEnv('ANSWER_MODEL');
 
 export const chunkingOptions: ChunkingOptions = {
   // Most messages a single chunk can hold

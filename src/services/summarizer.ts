@@ -1,7 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { betaZodOutputFormat } from '@anthropic-ai/sdk/helpers/beta/zod';
 import { z } from 'zod';
-import { summaryModel, type SummaryModel } from '../config.js';
+import { summaryModel, type ClaudeModel } from '../config.js';
 
 const ENTITY_TYPES = [
   'person',
@@ -56,7 +56,7 @@ export function isTransientError(error: unknown): boolean {
 // which is the format SYSTEM_PROMPT describes.
 export async function summarizeConversation(
   transcript: string,
-  model: SummaryModel = summaryModel,
+  model: ClaudeModel = summaryModel,
 ): Promise<ConversationSummary> {
   // Rate limits and overloads are retried with backoff, honouring retry-after; more retries than
   // the default 2, since a /summarize run sends several requests at once
