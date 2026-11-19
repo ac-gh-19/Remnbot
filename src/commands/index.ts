@@ -3,6 +3,7 @@ import * as ask from './ask.js';
 import * as backfill from './backfill.js';
 import * as chunk from './chunk.js';
 import * as summarize from './summarize.js';
+import * as usage from './usage.js';
 
 export interface Command {
   data: Pick<SlashCommandOptionsOnlyBuilder, 'name' | 'toJSON'>;
@@ -10,5 +11,5 @@ export interface Command {
 }
 
 export const commands = new Map<string, Command>(
-  [ask, backfill, chunk, summarize].map((command) => [command.data.name, command]),
+  [ask, backfill, chunk, summarize, usage].map((command) => [command.data.name, command]),
 );

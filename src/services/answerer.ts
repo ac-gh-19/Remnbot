@@ -4,6 +4,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { betaZodOutputFormat } from '@anthropic-ai/sdk/helpers/beta/zod';
 import { z } from 'zod';
 import { answerModel, type ClaudeModel } from '../config.js';
+import type { CallUsage } from '../usage.js';
 
 const AnswerSchema = z.object({
   overview: z.string(),
@@ -22,11 +23,13 @@ Return:
 - sourcesUsed: the N of every [source N] the overview draws on, and no others.
 - answerable: false when the sources don't answer the question. The overview then says briefly that the information wasn't found, and sourcesUsed is empty.`;
 
-// Thrown when Claude declines to answer or its reply doesn't fit AnswerSchema
+// Thrown when Claude declines to answer or its reply doesn't fit AnswerSchema. The response still
+// cost tokens, so it carries them for the usage table.
 export class AnswerError extends Error {
   constructor(
     message: string,
     readonly reason: 'refusal' | 'schema',
+    readonly usage: CallUsage,
   ) {
     super(message);
     this.name = 'AnswerError';
@@ -40,15 +43,16 @@ function escapeTags(text: string): string {
 
 let client: Anthropic | undefined;
 
-// Answers `question` from `context` (the source texts). `signal` cancels the request, including
-// any retries in progress. Throws AnswerError on a refusal or a reply that isn't an Answer, and
-// the SDK's errors when the API keeps failing.
+// Answers `question` from `context` (the source texts), returning the answer with the call's token
+// counts and the model that answered. `signal` cancels the request, including any retries in
+// progress. Throws AnswerError on a refusal or a reply that isn't an Answer, and the SDK's errors
+// when the API keeps failing.
 export async function answerQuestion(
   question: string,
   context: string,
   signal: AbortSignal,
   model: ClaudeModel = answerModel,
-): Promise<Answer> {
+): Promise<{ answer: Answer; usage: CallUsage }> {
   // Rate limits, overloads and server errors are retried twice (the SDK's default) with backoff
   client ??= new Anthropic();
 
@@ -67,17 +71,28 @@ export async function answerQuestion(
     { signal },
   );
 
+  // Top-level usage covers the attempt that produced this message, on response.model
+  const usage: CallUsage = {
+    model: response.model,
+    inputTokens: response.usage.input_tokens,
+    outputTokens: response.usage.output_tokens,
+    cacheWriteTokens: response.usage.cache_creation_input_tokens ?? 0,
+    cacheReadTokens: response.usage.cache_read_input_tokens ?? 0,
+  };
+
   if (response.stop_reason === 'refusal') {
     throw new AnswerError(
       `${response.model} declined to answer: ${response.stop_details?.explanation ?? 'no reason given'}`,
       'refusal',
+      usage,
     );
   }
   if (!response.parsed_output) {
     throw new AnswerError(
       `Answer from ${response.model} didn't match the schema (${response.stop_reason})`,
       'schema',
+      usage,
     );
   }
-  return response.parsed_output;
+  return { answer: response.parsed_output, usage };
 }

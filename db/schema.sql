@@ -89,3 +89,26 @@ CREATE TABLE IF NOT EXISTS windows (
 
 CREATE INDEX IF NOT EXISTS windows_embedding_idx ON windows USING hnsw (embedding vector_cosine_ops);
 CREATE INDEX IF NOT EXISTS windows_chunk_id_idx ON windows (chunk_id);
+
+-- Usage: one row per Claude call made for a server, so the API bill can be split between servers.
+-- A row starts 'pending' just before the call and becomes 'done' or 'failed' (a refusal or a reply
+-- in the wrong format, which still cost tokens) or 'interrupted' (a timeout, an error with no
+-- response, or a crash: the bot marks leftover 'pending' rows at startup). No foreign key to
+-- guilds, so the cost history outlives a server's other data.
+CREATE TABLE IF NOT EXISTS usage (
+  id                 BIGSERIAL PRIMARY KEY,
+  guild_id           BIGINT NOT NULL,
+  kind               TEXT NOT NULL CHECK (kind IN ('ask')),
+  status             TEXT NOT NULL DEFAULT 'pending'
+                       CHECK (status IN ('pending', 'done', 'failed', 'interrupted')),
+  started_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  finished_at        TIMESTAMPTZ,
+  model              TEXT,                   -- the model that answered (response.model), which a fallback can change
+  input_tokens       INT,
+  output_tokens      INT,
+  cache_write_tokens INT,
+  cache_read_tokens  INT,
+  cost_micro_usd     BIGINT                  -- millionths of a dollar at the price when written; NULL if unknown
+);
+
+CREATE INDEX IF NOT EXISTS usage_guild_id_started_at_idx ON usage (guild_id, started_at);

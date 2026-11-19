@@ -12,8 +12,9 @@ import { currentHolder, release, tryAcquire } from '../askLock.js';
 import { archivedChannels, authorNames } from '../db.js';
 import { fuse, searchLists } from '../retrieval.js';
 import { buildAnswerContext, type AnswerSource } from '../services/answerContext.js';
-import { AnswerError, answerQuestion } from '../services/answerer.js';
+import { AnswerError, answerQuestion, type Answer } from '../services/answerer.js';
 import { isTransientError } from '../services/summarizer.js';
+import { finishUsage, interruptUsage, startUsage } from '../usage.js';
 
 const QUESTION_MAX_LENGTH = 300;
 // Longest an answer may take before the Claude call is cancelled and a timeout error posted.
@@ -115,6 +116,27 @@ function errorReason(error: unknown): string {
   return 'Something went wrong while answering this question.';
 }
 
+// The Claude call with a usage row around it: 'pending' before, then 'done', 'failed' (refusal or
+// wrong format, which still cost tokens) or 'interrupted' (timeout or an error with no response).
+// The finishing writes aren't awaited, so recording cost never delays the reply.
+async function trackedAnswer(
+  question: string,
+  context: string,
+  guildId: string,
+  signal: AbortSignal,
+): Promise<Answer> {
+  const usageId = await startUsage(guildId);
+  try {
+    const { answer, usage } = await answerQuestion(question, context, signal);
+    void finishUsage(usageId, 'done', usage);
+    return answer;
+  } catch (error) {
+    if (error instanceof AnswerError) void finishUsage(usageId, 'failed', error.usage);
+    else void interruptUsage(usageId);
+    throw error;
+  }
+}
+
 // Search → context → Claude. Returns the embed to post. Every step stops when `signal` aborts.
 async function answer(
   question: string,
@@ -131,9 +153,10 @@ async function answer(
 
   const context = await buildAnswerContext(results);
   signal.throwIfAborted();
-  const { overview, sourcesUsed, answerable } = await answerQuestion(
+  const { overview, sourcesUsed, answerable } = await trackedAnswer(
     question,
     context.text,
+    member.guild.id,
     signal,
   );
   if (!answerable) {

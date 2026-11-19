@@ -55,6 +55,27 @@ function modelFromEnv(envName: string): ClaudeModel {
   return claudeModels[name];
 }
 
+// Dollars per million tokens, used to put a cost on each /ask call in the usage table. Covers the
+// models in claudeModels plus those server-side fallback can switch to (Opus 5 and Opus 4.8 for
+// Opus 5.5, Sonnet 5 for Sonnet 5.5). Cache writes are the 5-minute rate (1.25x input).
+// Checked against Anthropic's pricing on 2026-11-19; update when prices change.
+export interface ModelPrice {
+  input: number;
+  output: number;
+  cacheWrite: number;
+  cacheRead: number;
+}
+
+export const modelPrices: Record<string, ModelPrice> = {
+  'claude-opus-5-5': { input: 4, output: 20, cacheWrite: 5, cacheRead: 0.2 },
+  'claude-sonnet-5-5': { input: 2, output: 10, cacheWrite: 2.5, cacheRead: 0.1 },
+  // Prompts over 100K tokens cost $0.50 / $2.50 on Haiku 5.5; /ask's context stays well below
+  'claude-haiku-5-5': { input: 0.1, output: 0.5, cacheWrite: 0.125, cacheRead: 0.01 },
+  'claude-opus-5': { input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.5 },
+  'claude-opus-4-8': { input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.5 },
+  'claude-sonnet-5': { input: 2, output: 10, cacheWrite: 2.5, cacheRead: 0.2 },
+};
+
 export const summaryModel = modelFromEnv('SUMMARY_MODEL');
 export const answerModel = modelFromEnv('ANSWER_MODEL');
 

@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { Client, Events, GatewayIntentBits, MessageFlags, Partials } from 'discord.js';
 import { commands } from './commands/index.js';
+import { sweepPendingUsage } from './usage.js';
 const { DISCORD_TOKEN } = process.env;
 
 const client = new Client({
@@ -63,4 +64,6 @@ client.on(Events.Error, (error) => {
   console.error('Discord client error:', error);
 });
 
+// No /ask can be running yet, so any 'pending' usage row was left by a crash
+await sweepPendingUsage();
 client.login(DISCORD_TOKEN);
