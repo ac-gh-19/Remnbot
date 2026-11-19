@@ -36,7 +36,8 @@ From an empty database to an answered question:
 11. **`/ask`, answer** (`services/answerer.ts` + `commands/ask.ts`): Claude (`ANSWER_MODEL`, no
     tools) writes an overview from the context only, and says which sources it used. The
     command posts it publicly as one embed with "@asker asked:", the question, the overview and
-    links to the sources, then releases the lock.
+    links to the sources, then releases the lock. A `usage` row records the call's tokens and
+    cost for the server, which `/usage` adds up (`usage.ts`).
 
 `npm run eval` (`eval.ts`) reruns steps 6–8 over a fixed question set to score search quality.
 
@@ -140,12 +141,14 @@ with `DISCORD_TOKEN`:
      application in the Discord Developer Portal, or login fails.
    - *Partials* let discord.js emit events for objects it doesn't have fully cached (e.g. a
      reaction on an old message) instead of silently dropping them.
-2. `client.login(DISCORD_TOKEN)` sets the token on the REST client, asks Discord for the
+2. `sweepPendingUsage()` marks any `usage` row a crash left `pending` as `interrupted` (see
+   [Usage tracking](#usage-tracking-usage)).
+3. `client.login(DISCORD_TOKEN)` sets the token on the REST client, asks Discord for the
    gateway URL, opens the WebSocket and identifies with the token and intents. Discord
    replies with the bot's user and the guilds it's in, and discord.js populates its caches.
-3. When that handshake finishes, `Events.ClientReady` fires once and logs
+4. When that handshake finishes, `Events.ClientReady` fires once and logs
    `Logged in as <bot tag>`.
-4. From then on discord.js keeps the connection alive (heartbeats, automatic reconnect and
+5. From then on discord.js keeps the connection alive (heartbeats, automatic reconnect and
    resume). Connection-level problems surface through `Events.Error`, which is logged.
 
 The token identifies the *bot user*, not a person. Anyone holding it can act as the bot, so it
@@ -373,6 +376,29 @@ it. The full design is in `docs/specs/ask-command.md`.
    at a line break to fit the embed's 4,096 characters, and the Sources list links to each used
    conversation's first message.
 
+## Usage tracking (`/usage`)
+
+`src/usage.ts` records what each `/ask` Claude call costs, per server, so the API bill can be
+split between servers. Nothing is charged or blocked; it only measures. The full design is in
+`docs/specs/usage-tracking.md`.
+
+1. **Start** (`commands/ask.ts` → `usage.ts`): just before the Claude call, a `usage` row is
+   inserted as `pending`. A question with no search results never reaches Claude and leaves no row.
+2. **Finish**: `services/answerer.ts` returns the token counts and `response.model` (which differs
+   from the requested model when a server-side fallback answered). The row becomes `done`, or
+   `failed` for a refusal or a reply in the wrong format (both still cost tokens), with a cost in
+   micro-dollars from `modelPrices` in `config.ts`. A timeout or an error with no response makes it
+   `interrupted`, with no tokens or cost.
+3. **Crash sweep** (`index.ts`): on startup, before logging in, any row still `pending` is marked
+   `interrupted`; the bot is one process, so nothing can be in flight then.
+4. **`/usage`** (`commands/usage.ts`, Manage Server, visible only to its user): this server's cost
+   and question count for this calendar month (UTC) and all time, plus how many questions have no
+   known cost (interrupted, or a model missing from the price table) when there are any.
+
+Writing a usage row never throws: a failure is logged and `/ask` answers as usual. The finishing
+writes aren't awaited, so they don't delay the reply. Only `/ask` is tracked; Voyage embeddings
+and `/summarize` aren't.
+
 ## Measuring search (`npm run eval`)
 
 `src/eval.ts` reads `eval-questions.json`: 80 questions, a broad and a detail one written by
@@ -386,7 +412,7 @@ files quote real messages and are gitignored.
 
 ## Database
 
-`db/schema.sql` defines five tables. Discord IDs are 64-bit snowflakes stored as `BIGINT`;
+`db/schema.sql` defines six tables. Discord IDs are 64-bit snowflakes stored as `BIGINT`;
 `pg` returns them as strings, which matches how discord.js represents IDs. It needs the
 [pgvector](https://github.com/pgvector/pgvector) extension (bundled with Postgres.app).
 
@@ -407,6 +433,11 @@ files quote real messages and are gitignored.
   `last_message_id`), with their `embedding` and `embedding_model`. `chunk_id` cascades, so
   `/chunk` replacing a chunk deletes its windows. Stores the range, not the text, so what's
   shown can't drift from the messages.
+- `usage` — one row per `/ask` Claude call: `guild_id`, `kind` (`'ask'`), `status`
+  (`pending`/`done`/`failed`/`interrupted`), start and finish times, the answering `model`, the
+  four token counts, and `cost_micro_usd` (millionths of a dollar, fixed at the price when written;
+  NULL when unknown). Indexed on `(guild_id, started_at)`. It has no foreign key to `guilds`, so
+  the cost history outlives a server's other data.
 
 The schema isn't applied automatically; create the database and run it once:
 
