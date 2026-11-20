@@ -17,6 +17,17 @@ question is matched against all of them at once. You can ask something general, 
 finds the conversations that fit, has Claude answer from them, and links straight to the
 messages so you can read what was actually said.
 
+## Examples
+
+A vague question, answered from the closest matching conversation with a link to it:
+
+![/ask about a car crash, answered from a 2022 conversation with a source link](Example1.png)
+
+Mentioning a person narrows the search to their conversations, and the answer says what the
+sources can't confirm instead of guessing:
+
+![/ask about a friend's first track meet, listing their earliest meets found](Example2.png)
+
 ## How it works
 
 1. **`/backfill`** saves a channel's full message history to Postgres.
